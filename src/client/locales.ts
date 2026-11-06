@@ -421,6 +421,7 @@ const TEXT = {
   'change.paused': ['暂停处理', 'Processing paused'],
   'change.resumed': ['恢复处理', 'Processing resumed'],
   'change.maxWorkers': ['并行工单数：{from} → {to}', 'Concurrent Tickets: {from} → {to}'],
+  'change.executorBackend': ['执行器：{from} → {to}', 'Executor: {from} → {to}'],
   'change.executionDirectory': ['执行目录的根目录：{from} → {to}', 'Ticket directory root: {from} → {to}'],
   'change.prepareCommand': ['准备命令', 'Prepare command'],
   'change.blockedCommands': ['禁止调用的命令：{from} → {to}', 'Blocked commands: {from} → {to}'],

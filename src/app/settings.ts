@@ -173,7 +173,10 @@ export class Settings {
       const delivery = await sessions.delivery(`settings:${block}`)
       return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false, context_delivery: delivery }
     }
-    const restarting = setupChanged(old, settings) || !this.host.setup.configured()
+    // The backend and its T3 paths are read when Runtime constructs the Executor, so changing them takes a restart.
+    const executorBackendChanged = old.executor.backend !== settings.executor.backend
+      || JSON.stringify(old.executor.t3) !== JSON.stringify(settings.executor.t3)
+    const restarting = setupChanged(old, settings) || executorBackendChanged || !this.host.setup.configured()
     const before = policyVersion(old), after = policyVersion(settings)
     const scope = (version: SettingsValue) => ({
       scope: (input: { source: string; meta: Record<string, unknown> }) => this.host.sources.scope(input, version) })

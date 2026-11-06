@@ -156,6 +156,20 @@ Setup must succeed before polling or work starts. Overview lists missing require
    List personal CLIs, such as one signed in to your own account, as blocked commands.
 4. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
 
+### T3 executor
+
+The Executor settings choose a backend with `backend`: `dsh` (the default) runs each Assignment in a DSH worker Session, while `t3` runs it in a T3 Code thread. T3 settings live under `executor.t3`: `bin`, `mcpUrl`, `project`, `provider`, `model` and `ghConfigDir`. The MCP token is read from `T3_MCP_TOKEN` (or `T3_MCP_ACCESS_TOKEN`) and is never stored in settings.
+
+```sh
+rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.blocks.executor.revision')
+curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/executor \
+  -d "{\"value\": {\"backend\": \"t3\", \"model\": null, \"maxWorkers\": 3, \"directory\": \"\", \"prepare\": \"\", \"blockedCommands\": [], \"t3\": {\"bin\": \"\", \"mcpUrl\": \"http://127.0.0.1:3773/mcp\", \"project\": \"\", \"provider\": \"magpie-codex\", \"model\": \"auto/dfmodel\", \"ghConfigDir\": \"\"}}, \"revision\": $rev}"
+```
+
+T3 threads bind the prepared Ticket worktree through MCP's `workspaceStrategy: {type: "existing_worktree"}`. The CLI cannot name an existing worktree, so a Ticket with a worktree fails with `T3_MCP_REQUIRED_FOR_WORKTREE` instead of silently launching in the project root. The executor verifies the configured agent account with `gh api user` before launch, and requires a final `psa-report` JSON block; a missing or invalid report marks the Assignment failed rather than guessing an outcome.
+
+The T3 Code server starts agent shells with its own environment. Start it with the agent account's `GH_CONFIG_DIR` and git identity set, so the thread's `gh` and `git` act as that account, not the operator's personal login. `pnpm doctor:t3` checks the CLI identity, T3 CLI, T3 MCP, Magpie and the DSH harness.
+
 ### Management API
 
 The panel uses a local HTTP API that agents can also call. `SETUP.md` uses it to save settings, and the service script reads `GET state`.
@@ -202,7 +216,7 @@ The blocks:
 - `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
 - `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
-- `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
+- `executor`: `backend`, `model`, `maxWorkers`, `directory`, `prepare`, `blockedCommands` and `t3`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
 
 Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
 

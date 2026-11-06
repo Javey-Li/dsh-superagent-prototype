@@ -48,7 +48,8 @@
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "pnpm typecheck && pnpm test && pnpm build"
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "doctor:t3": "node --experimental-strip-types scripts/t3-doctor.ts"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0",

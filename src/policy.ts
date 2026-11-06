@@ -87,13 +87,28 @@ export const EvalConfigSchema = z.object({
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')
   .refine(name => !WORKER_COMMANDS.includes(name), `${WORKER_COMMANDS.join(', ')} cannot be blocked`)
-/** Executor settings: worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command, and blocked commands. */
+/**
+ * T3 executor settings. `bin`, `mcpUrl`, `project`, and `ghConfigDir` default to the environment or T3's local defaults.
+ * The MCP token is never stored here; set `T3_MCP_TOKEN` in the host environment.
+ */
+export const T3ConfigSchema = z.object({
+  bin: z.string().trim().default(''),
+  mcpUrl: z.string().trim().default(''),
+  project: z.string().trim().default(''),
+  provider: z.string().trim().default('magpie-codex'),
+  model: z.string().trim().default('auto/dfmodel'),
+  ghConfigDir: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for ~/.config/gh').default(''),
+}).strict()
+export type T3Config = z.infer<typeof T3ConfigSchema>
+/** Executor settings: backend, worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command, and blocked commands. */
 export const ExecutorConfigSchema = z.object({
+  backend: z.enum(['dsh', 't3']).default('dsh'),
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
+  t3: T3ConfigSchema.default(() => T3ConfigSchema.parse({})),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({
