@@ -1,4 +1,4 @@
-/** SQLite persistence for domain aggregates, key-value state, settings history, and the channel outbox. */
+/** SQLite persistence for domain aggregates, baseline records, key-value state, settings history, and the channel outbox. */
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -7,6 +7,8 @@ import { key, threadKey, type ChannelRef, type Decision, type OutboundMessage, t
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
 import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, tooOld } from './migration.ts'
+import { baselineFromStored, baselineRecord, promotionRefusal, storedBaseline, type BaselineInput, type BaselineQuery,
+  type BaselineRecord } from './baseline.ts'
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
 
@@ -80,10 +82,15 @@ export class Store implements Repositories {
             CREATE TABLE IF NOT EXISTS effect (kind TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, seq INTEGER NOT NULL,
               generation INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', due INTEGER NOT NULL,
               since TEXT NOT NULL, PRIMARY KEY (kind, key));
+            CREATE TABLE IF NOT EXISTS baseline (id TEXT PRIMARY KEY, project TEXT NOT NULL, who_said TEXT NOT NULL,
+              type TEXT NOT NULL, status TEXT NOT NULL, at TEXT NOT NULL, value TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS trigger_at ON trigger(at);
             CREATE INDEX IF NOT EXISTS trigger_thread_at ON trigger_thread(thread, at);
             CREATE INDEX IF NOT EXISTS decision_thread ON decision(thread);
             CREATE INDEX IF NOT EXISTS effect_due ON effect(kind, due, seq);
+            CREATE INDEX IF NOT EXISTS baseline_project_who_said ON baseline(project, who_said);
+            CREATE INDEX IF NOT EXISTS baseline_who_said ON baseline(who_said);
+            CREATE INDEX IF NOT EXISTS baseline_at ON baseline(at);
           `)
           this.addColumns()
           if (migrating) migrateTo11(this)
@@ -244,6 +251,56 @@ export class Store implements Repositories {
     get: (id: string): Decision | undefined => { const row = this.db.prepare('SELECT value FROM decision WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Decision : undefined },
     save: (decision: Decision): void => { this.db.prepare('INSERT INTO decision VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, thread=excluded.thread').run(decision.id, decision.threadKey, JSON.stringify(decision)) },
     byThread: (threadKeyValue: string): Decision[] => this.db.prepare('SELECT value FROM decision WHERE thread=? ORDER BY rowid').all(threadKeyValue).map(row => JSON.parse(String(row.value)) as Decision),
+  }
+  /**
+   * Baseline records, separate from the domain repositories. A record's `whoSaid` never changes in place: an owner
+   * confirmation creates a new record, so an AI record cannot be rewritten as the owner's word.
+   */
+  readonly baseline = {
+    get: (id: string): BaselineRecord | undefined => {
+      const row = this.db.prepare('SELECT value FROM baseline WHERE id=?').get(id)
+      return row ? baselineFromStored(JSON.parse(String(row.value))) : undefined
+    },
+    /** Inserts or updates a record, refusing a change of `whoSaid` on an existing id. */
+    save: (input: BaselineInput): BaselineRecord => {
+      const record = baselineRecord(input)
+      const existing = this.baseline.get(record.id)
+      if (existing && existing.whoSaid !== record.whoSaid) {
+        throw new Error(`Baseline record ${record.id} already has whoSaid ${existing.whoSaid}; whoSaid never changes in place. Create a new record the owner confirmed`)
+      }
+      this.putBaseline(record)
+      return record
+    },
+    /** Newest first, filtered by any of project, whoSaid, type and status. */
+    list: (query: BaselineQuery = {}): BaselineRecord[] => {
+      const where: string[] = []
+      const parameters: SQLInputValue[] = []
+      if (query.projectId !== undefined) { where.push('project = ?'); parameters.push(query.projectId) }
+      if (query.whoSaid !== undefined) { where.push('who_said = ?'); parameters.push(query.whoSaid) }
+      if (query.type !== undefined) { where.push('type = ?'); parameters.push(query.type) }
+      if (query.status !== undefined) { where.push('status = ?'); parameters.push(query.status) }
+      const limit = Math.max(1, Math.min(1000, Math.trunc(query.limit ?? 100)))
+      const sql = `SELECT value FROM baseline${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY at DESC, rowid DESC LIMIT ?`
+      return this.db.prepare(sql).all(...parameters, limit).map(row => baselineFromStored(JSON.parse(String(row.value))))
+    },
+    /** Marks an already-owner-supported normative record as promoted; idempotent. */
+    promote: (id: string): BaselineRecord => {
+      const record = this.baseline.get(id)
+      if (!record) throw new Error(`Unknown baseline record ${id}`)
+      const refusal = promotionRefusal(record)
+      if (refusal) throw new Error(refusal)
+      if (record.status === 'promoted') return record
+      const promoted: BaselineRecord = { ...record, status: 'promoted', lastVerified: new Date().toISOString() }
+      this.putBaseline(promoted)
+      return promoted
+    },
+  }
+  /** Writes one baseline record and its query columns, replacing the row with the same id. */
+  private putBaseline(record: BaselineRecord): void {
+    this.db.prepare(`INSERT INTO baseline (id, project, who_said, type, status, at, value) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET project=excluded.project, who_said=excluded.who_said, type=excluded.type,
+        status=excluded.status, at=excluded.at, value=excluded.value`)
+      .run(record.id, record.projectId, record.whoSaid, record.type, record.status, record.createdAt, JSON.stringify(storedBaseline(record)))
   }
   /** Read-only queries for management views, orchestrator tools, and source polling (see `storeReads`). */
   readonly read: ReturnType<typeof storeReads>
