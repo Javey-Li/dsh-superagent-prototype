@@ -22,6 +22,8 @@ import type { Variable } from '../app/execution-environment.ts'
 import { batchLine, batchOf, inputMessage as inputTextOf, mandateInstructions, ticketExecution, triggerMessage } from './dsh.ts'
 import type { ExecutorRuntime } from './backend.ts'
 import { renderTicketContext, ticketContextPackage } from '../app/context-package.ts'
+import { claimPull, readPull } from '../sources/github-pull.ts'
+import type { SourceContext } from '../sources/host.ts'
 
 /** Default T3 server binary on this machine; override with `T3_BIN` or Execution settings. */
 export const T3_DEFAULT_BIN = '/Users/javeyli/Projects/t3code/apps/server/dist/bin.mjs'
@@ -32,9 +34,15 @@ export const T3_DEFAULT_MODEL = 'auto/dfmodel'
 const MCP_PROTOCOL_VERSION = '2025-06-18'
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 const WAIT_SLICE_MS = 300_000
+const FOLLOW_POLL_MS = 5_000
 const PREPARE_TIMEOUT_MS = 180_000
 const TERMINAL_STATUS = new Set(['completed', 'failed', 'interrupted', 'cancelled', 'rolled_back'])
 const RUNNING_STATUS = new Set(['preparing', 'queued', 'starting', 'running'])
+/**
+ * The question an older build put on a Ticket when a T3 thread was waiting for an external event. Current builds never ask
+ * it, so any occurrence on an open Ticket is stale and superseded by the executor's later reports.
+ */
+const STALE_WAITING_QUESTION = 'Answer the T3 thread question, then send a message to this Ticket to continue.'
 
 const now = (): string => new Date().toISOString()
 const firstLine = (text: string): string => String(text || '').trim().split('\n')[0]?.trim() ?? ''
@@ -316,8 +324,12 @@ export const PSA_PROTOCOL = [
   '```',
   'State is one of: progress (work continues), waiting (you need another external event), ready (the assignment is complete and verified),',
   'blocked or failed (a person must act; add "question"), dropped (there is nothing to do).',
+  'A waiting report ends your run: the executor keeps following this thread, so the next run an external event wakes must end',
+  'with the final state and its report.',
   'summary is required, factual, and at most 4000 characters. A ready report ends the Ticket. A blocked or failed report must include',
   '"question" with the one decision or action the person must take; optionally "asked_by" with a trigger_id from the context.',
+  'A waiting or ready report that names the ticket\'s pull request must put its https://github.com/<owner>/<repo>/pull/<number>',
+  'link in the summary so the Ticket follows the PR; a ready report whose PR cannot be bound is rejected.',
   'ticket_id and assignment_id must repeat the context values exactly; a report naming another ticket or assignment is rejected.',
 ].join('\n')
 
@@ -373,6 +385,8 @@ export interface T3ExecutorHost {
   readonly machine: Pick<Machine, 'stateDir'>
   readonly lifetime: AbortSignal
   readonly health?: HealthEntry
+  /** The GitHub Source context for claiming the pull requests a T3 report names; throws while setup is not configured. */
+  readonly github: () => SourceContext
   /** Execution environment variables for `ticket`, passed to its workspace prepare command. */
   environment(ticket: Ticket): Variable[]
   /** The resolved deployment; throws while setup is not configured. */
@@ -395,7 +409,8 @@ export interface T3ExecutorOptions {
   spawnImpl?: SpawnImpl
   fetchImpl?: typeof fetch
   env?: NodeJS.ProcessEnv
-  timeouts?: Partial<{ version: number; list: number; launch: number; send: number; wait: number; read: number; interrupt: number }>
+  timeouts?: Partial<{ version: number; list: number; launch: number; send: number; wait: number; read: number; interrupt: number
+    followPoll: number }>
   mcpRetryMs?: number
   maxRunMs?: number
   /** Maximum concurrent T3 assignments; defaults to `executor.maxWorkers`. Composite routing passes the write quota. */
@@ -414,13 +429,16 @@ export class T3Executor implements ExecutorRuntime {
   private readonly mcp: T3McpClient
   private readonly spawnImpl: SpawnImpl
   private readonly baseEnv: NodeJS.ProcessEnv
-  private readonly timeouts: { version: number; list: number; launch: number; send: number; wait: number; read: number; interrupt: number }
+  private readonly timeouts: { version: number; list: number; launch: number; send: number; wait: number; read: number; interrupt: number
+    followPoll: number }
   private readonly launchQueue: { ticketId: string; assignmentId: string }[] = []
   private readonly deliveryQueue = new Map<string, { ticketId: string; assignmentId: string }>()
   private readonly queued = new Set<string>()
   private readonly running = new Map<string, Set<ActiveRun>>()
   private readonly follows = new Set<Promise<void>>()
   private readonly held = new Set<string>()
+  /** Per Assignment, the T3 runs an active follow already owns; a second follow for the same run leaves reporting to it. */
+  private readonly claimedRuns = new Map<string, Set<string>>()
   private readonly slotWaiters: { assignmentId: string; wake: () => void }[] = []
   private readonly idleWaiters: (() => void)[] = []
   private readonly projectIds = new Map<string, string>()
@@ -439,7 +457,7 @@ export class T3Executor implements ExecutorRuntime {
     this.spawnImpl = options.spawnImpl ?? nodeSpawn as unknown as SpawnImpl
     this.baseEnv = options.env ?? process.env
     this.timeouts = { version: 10_000, list: 30_000, launch: 60_000, send: 300_000, wait: WAIT_SLICE_MS, read: 30_000,
-      interrupt: 15_000, ...options.timeouts }
+      interrupt: 15_000, followPoll: FOLLOW_POLL_MS, ...options.timeouts }
     this.mcp = new T3McpClient({ url: this.mcpUrl(), token: this.mcpToken(), fetchImpl: options.fetchImpl,
       connectTimeoutMs: this.timeouts.version, callTimeoutMs: this.timeouts.list })
     // A host stop aborts every run; the signal is composed with each run's own controller.
@@ -486,9 +504,17 @@ export class T3Executor implements ExecutorRuntime {
   /** Reconcile open tickets after a host restart. */
   resume(): void {
     for (const ticket of this.host.store.tickets.open().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      this.clearStaleAttention(ticket)
       const running = runningAssignment(ticket)
       if (running) {
         const thread = this.threadOf(ticket.id)
+        // A run that reported waiting was waiting for an external event, not for the host: keep following its thread
+        // instead of interrupting it, so the next run the event wakes reports its final state.
+        if (running.report?.state === 'waiting' && thread) {
+          this.follow({ ticketId: ticket.id, assignmentId: running.id, threadId: thread.threadId, runId: null, inputIds: [],
+            mode: this.ledger.entry(running.id)?.mode ?? 'mcp' })
+          continue
+        }
         void (async () => {
           if (thread) await this.interrupt(thread.threadId, 'dsh-superagent restarted')
           if (!this.stopping) this.host.engine.assignmentInterrupted(ticket.id, running.id)
@@ -497,6 +523,23 @@ export class T3Executor implements ExecutorRuntime {
       }
       const latest = latestAssignment(ticket)
       if (latest?.state === 'pending' && !waitsForPerson(ticket)) this.start(ticket, latest)
+    }
+  }
+
+  /**
+   * Clears the person question an older build fabricated when a T3 thread was waiting for an external event. Such a
+   * question is never asked again and a later report supersedes it, so an open Ticket that still carries it is showing a
+   * stale "待回答" instead of its true stage.
+   */
+  private clearStaleAttention(ticket: Ticket): void {
+    if (ticket.attention?.question !== STALE_WAITING_QUESTION) return
+    const report = latestAssignment(ticket)?.report
+    if (!report) return
+    try {
+      this.host.engine.report(ticket.id, { state: report.state, summary: report.summary, question: null })
+      this.health('ready', `Cleared the stale T3 waiting question on ${ticket.id}`)
+    } catch (error) {
+      this.warn(`Clearing the stale T3 waiting question on ${ticket.id} failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -941,12 +984,12 @@ export class T3Executor implements ExecutorRuntime {
     runs.add(run); this.running.set(input.assignmentId, runs)
     const promise = (async () => {
       try {
-        const outcome = await this.waitRun(input.threadId, input.runId, input.mode, abort.signal)
-        if (abort.signal.aborted || !this.current(input.ticketId, input.assignmentId)) return
-        this.host.engine.turnEnded(input.ticketId, input.assignmentId)
-        if (input.inputIds.length) this.host.engine.inputsRead(input.ticketId, input.inputIds)
-        const report = await this.reportFor(input.ticketId, input.assignmentId, input.threadId, outcome, input.mode)
-        if (report) this.report(input.ticketId, input.assignmentId, report)
+        // Another active follow for the same Assignment already owns this run and will report its outcome.
+        if (!this.claim(input.assignmentId, input.runId)) return
+        const report = await this.followRuns(input.ticketId, input.assignmentId, input.threadId, input.runId, input.mode,
+          input.inputIds, abort.signal)
+        if (!report || abort.signal.aborted || !this.current(input.ticketId, input.assignmentId)) return
+        this.report(input.ticketId, input.assignmentId, report)
         this.health('ready', 'T3 thread reported')
       } catch (error) {
         if (abort.signal.aborted || isAborted(error)) return
@@ -954,7 +997,7 @@ export class T3Executor implements ExecutorRuntime {
       } finally {
         const active = this.running.get(input.assignmentId)
         active?.delete(run)
-        if (!active?.size) this.running.delete(input.assignmentId)
+        if (!active?.size) { this.running.delete(input.assignmentId); this.claimedRuns.delete(input.assignmentId) }
         this.release(input.assignmentId)
         this.host.lifetime.removeEventListener('abort', onLifetime)
         this.notifyIdle()
@@ -962,6 +1005,97 @@ export class T3Executor implements ExecutorRuntime {
     })()
     this.follows.add(promise)
     void promise.finally(() => { this.follows.delete(promise) })
+  }
+
+  /**
+   * Follows the T3 thread until it reports a terminal state. A turn that ends `waiting` — the thread is waiting for an
+   * external event, such as a CI check or a PR watch — is reported as such, and the executor keeps following the thread so
+   * the run that event wakes reports its final state to the Ticket. A run already owned by another active follow ends this
+   * follow silently; the deadline and the host's lifetime bound the whole wait.
+   */
+  private async followRuns(ticketId: string, assignmentId: string, threadId: string, runId: string | null, mode: string,
+    inputIds: string[], signal: AbortSignal): Promise<WorkerReport | undefined> {
+    const deadline = Date.now() + (this.options.maxRunMs ?? 6 * 60 * 60_000)
+    let current = runId ?? await this.latestRunOf(threadId, mode)
+    let first = true
+    for (;;) {
+      if (signal.aborted || !this.current(ticketId, assignmentId)) return undefined
+      if (current === null) {
+        this.report(ticketId, assignmentId, this.waitingReport(threadId))
+        const next = await this.nextRun(threadId, null, mode, deadline, signal)
+        if (next === null) return this.followDeadlineReport(threadId, signal, ticketId, assignmentId)
+        if (!this.claim(assignmentId, next)) return undefined
+        current = next
+        continue
+      }
+      const outcome = await this.waitRun(threadId, current, mode, signal)
+      if (signal.aborted || !this.current(ticketId, assignmentId)) return undefined
+      this.host.engine.turnEnded(ticketId, assignmentId)
+      if (first) {
+        if (inputIds.length) this.host.engine.inputsRead(ticketId, inputIds)
+        first = false
+      }
+      const report = await this.reportFor(ticketId, assignmentId, threadId, outcome, mode)
+      // A stale or duplicate report ends this follow without relaying anything, as before.
+      if (!report) return undefined
+      if (report.state !== 'waiting') return report
+      this.report(ticketId, assignmentId, report)
+      // The wait ended on a pending input before the run settled (such as an approval): wait the same run again,
+      // whose completion reports through its own final message.
+      if (outcome.status === 'waiting') continue
+      const next = await this.nextRun(threadId, current, mode, deadline, signal)
+      if (next === null) return this.followDeadlineReport(threadId, signal, ticketId, assignmentId)
+      if (!this.claim(assignmentId, next)) return undefined
+      current = next
+    }
+  }
+
+  private waitingReport(threadId: string): WorkerReport {
+    return { state: 'waiting', summary: `T3 thread ${threadId} is waiting for an external event; the executor keeps following the thread for its next run.` }
+  }
+
+  /** The report when the thread is still waiting and no new run started before the executor's limit. */
+  private followDeadlineReport(threadId: string, signal: AbortSignal, ticketId: string, assignmentId: string): WorkerReport | undefined {
+    if (signal.aborted || !this.current(ticketId, assignmentId)) return undefined
+    return { state: 'blocked', summary: `T3 thread ${threadId} is waiting for an external event, and no new run started before the executor's limit; a person must decide whether to retry` }
+  }
+
+  /** Claims a run for this follow; false when another active follow for the same Assignment owns it. */
+  private claim(assignmentId: string, runId: string | null): boolean {
+    if (!runId) return true
+    let claimed = this.claimedRuns.get(assignmentId)
+    if (!claimed) { claimed = new Set(); this.claimedRuns.set(assignmentId, claimed) }
+    if (claimed.has(runId)) return false
+    claimed.add(runId)
+    return true
+  }
+
+  /** Polls the thread until a run other than `previous` appears, or the deadline passes; the host's lifetime aborts the wait. */
+  private async nextRun(threadId: string, previous: string | null, mode: string, deadline: number, signal: AbortSignal): Promise<string | null> {
+    for (;;) {
+      if (signal.aborted) throw abortError()
+      if (Date.now() > deadline) return null
+      const runId = await this.latestRunOf(threadId, mode)
+      if (runId && runId !== previous) return runId
+      await sleep(this.timeouts.followPoll, signal)
+    }
+  }
+
+  /** The newest run of the thread: `latestRunId` first, then the newest item or recent run naming one. */
+  private async latestRunOf(threadId: string, mode: string): Promise<string | null> {
+    if (mode === 'cli') {
+      const shown = await this.showCli(threadId)
+      const message = shown.messages.findLast(entry => typeof entry.runId === 'string')
+      return typeof message?.runId === 'string' ? message.runId : null
+    }
+    const read = await this.readMcp(threadId, 5)
+    const thread = read.thread as Record<string, unknown> | undefined
+    const latest = typeof thread?.latestRunId === 'string' ? thread.latestRunId : null
+    const items = Array.isArray(read.items) ? read.items as Record<string, unknown>[] : []
+    const itemRun = items.findLast(entry => typeof entry.runId === 'string')?.runId
+    const runs = Array.isArray(read.recentRuns) ? read.recentRuns as Record<string, unknown>[] : []
+    const recent = runs.findLast(entry => typeof entry.runId === 'string')?.runId
+    return (latest ?? itemRun ?? recent ?? null) as string | null
   }
 
   private async waitRun(threadId: string, runId: string | null, mode: string, signal: AbortSignal): Promise<{ status: string; runId: string | null; error?: string }> {
@@ -1006,13 +1140,25 @@ export class T3Executor implements ExecutorRuntime {
     mode: string): Promise<WorkerReport | undefined> {
     const ticket = this.host.store.tickets.get(ticketId)
     if (!ticket || !liveTicket(ticket)) return undefined
-    if (outcome.status === 'waiting') return { state: 'blocked', summary: `T3 thread ${threadId} is waiting for a person's answer.`,
-      question: 'Answer the T3 thread question, then send a message to this Ticket to continue.' }
+    // Waiting on an external event is not a question for a person: report it as waiting and keep following the thread.
+    if (outcome.status === 'waiting') return this.waitingReport(threadId)
     if (outcome.status === 'completed') {
       const text = mode === 'cli' ? await this.finalTextCli(threadId, outcome.runId) : await this.finalTextMcp(threadId, outcome.runId)
       const report = parsePsaReport(text)
       if (!report) return { state: 'blocked', summary: `psa-report 解析失败：缺少符合 schema_version 1 的 report 块。原始输出：${text.trim().slice(-1_200) || '(empty)'}` }
-      return this.workerReport(ticket, assignmentId, report)
+      const converted = this.workerReport(ticket, assignmentId, report)
+      if (!converted) return undefined
+      const pulls = this.pullNumbersIn(report.summary)
+      if (pulls.length) {
+        const refused = await this.claimReportedPulls(ticket, pulls)
+        if (refused) {
+          // A ready report without its PR would end the Ticket as completed without the PR link; refuse it for a person.
+          if (converted.state === 'ready') return { state: 'blocked',
+            summary: `psa-report 引用的 PR 无法绑定：${refused}。报告内容：${report.summary.slice(0, 1_500)}` }
+          this.warn(`PR binding for ${ticket.id} was refused: ${refused}`)
+        }
+      }
+      return converted
     }
     if (['failed', 'rolled_back', 'interrupted', 'cancelled'].includes(outcome.status)) {
       const text = outcome.error ?? (mode === 'cli' ? '' : await this.errorTextMcp(threadId, outcome.runId))
@@ -1020,6 +1166,38 @@ export class T3Executor implements ExecutorRuntime {
     }
     if (outcome.status === 'running') await this.interrupt(threadId, 'T3 run exceeded the executor limit')
     return { state: 'blocked', summary: `T3 run is still running after the executor's limit; a person must decide whether to retry` }
+  }
+
+  /**
+   * Claims the pull requests a report's summary names, so the Ticket follows its PR and a later merge or close ends it.
+   * The GitHub Source's claim rules decide whether a PR belongs to the Ticket; the first refusal is returned.
+   */
+  private async claimReportedPulls(ticket: Ticket, numbers: number[]): Promise<string | undefined> {
+    let github: SourceContext
+    try { github = this.host.github() } catch { return undefined }
+    for (const number of numbers) {
+      try {
+        const pr = await readPull(github, number)
+        const refused = claimPull(github, ticket.id, pr)
+        if (refused) return refused
+      } catch (error) {
+        return `读取 PR #${number} 失败：${error instanceof Error ? error.message : String(error)}`
+      }
+    }
+    return undefined
+  }
+
+  /** The pull request numbers of the configured repository that a summary names, deduplicated, in reading order. */
+  private pullNumbersIn(summary: string): number[] {
+    let repository: string | undefined
+    try { repository = this.host.github().deployment.repository } catch { return [] }
+    const pattern = new RegExp(`https://github\\.com/${repository.replace('/', '\\/')}/pull/(\\d+)`, 'g')
+    const numbers: number[] = []
+    for (const match of summary.matchAll(pattern)) {
+      const number = Number(match[1])
+      if (Number.isInteger(number) && number > 0 && !numbers.includes(number)) numbers.push(number)
+    }
+    return numbers
   }
 
   /**
@@ -1092,7 +1270,11 @@ export class T3Executor implements ExecutorRuntime {
 
   private report(ticketId: string, assignmentId: string, report: WorkerReport): void {
     if (!this.current(ticketId, assignmentId)) return
-    try { this.host.engine.report(ticketId, report) }
+    let value = report
+    const ticket = this.host.store.tickets.get(ticketId)
+    // A question an older build fabricated for a waiting thread is never asked again: any later report supersedes it.
+    if (ticket?.attention?.question === STALE_WAITING_QUESTION && value.question === undefined) value = { ...value, question: null }
+    try { this.host.engine.report(ticketId, value) }
     catch (error) {
       // Never repair a rejected report into another state: a person must see the protocol or binding failure.
       const why = error instanceof Error ? error.message : String(error)

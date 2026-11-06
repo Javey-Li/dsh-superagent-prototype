@@ -132,7 +132,8 @@ export class Runtime extends Service implements SourceHost {
       const workerHealth = board.claim('worker')
       const t3 = (options: { maxWorkers?: number } = {}) => new T3Executor({ get engine() { return runtime.engine }, store, machine,
         lifetime: this.lifetime, health: workerHealth, deployment: () => setup.deployment, environment, sourceLink: link,
-        repliedTo: trigger => repliedTo({ store, sources }, trigger), closing: () => this.closing() }, options)
+        repliedTo: trigger => repliedTo({ store, sources }, trigger), closing: () => this.closing(),
+        github: () => runtime.context({ kind: 'github', health: ['github'] }) }, options)
       const dsh = () => new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: workerHealth, machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
