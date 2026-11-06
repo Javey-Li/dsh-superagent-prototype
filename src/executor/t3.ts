@@ -380,6 +380,8 @@ export interface T3ExecutorOptions {
   timeouts?: Partial<{ version: number; list: number; launch: number; send: number; wait: number; read: number; interrupt: number }>
   mcpRetryMs?: number
   maxRunMs?: number
+  /** Maximum concurrent T3 assignments; defaults to `executor.maxWorkers`. Composite routing passes the write quota. */
+  maxWorkers?: number
   verifyIdentity?: boolean
 }
 
@@ -401,7 +403,7 @@ export class T3Executor implements ExecutorRuntime {
   private readonly running = new Map<string, Set<ActiveRun>>()
   private readonly follows = new Set<Promise<void>>()
   private readonly held = new Set<string>()
-  private readonly slotWaiters: (() => void)[] = []
+  private readonly slotWaiters: { assignmentId: string; wake: () => void }[] = []
   private readonly idleWaiters: (() => void)[] = []
   private readonly projectIds = new Map<string, string>()
   private readonly projectCache = new Map<string, string>()
@@ -495,6 +497,7 @@ export class T3Executor implements ExecutorRuntime {
     this.disposed = true
     for (const runs of this.running.values()) for (const run of runs) run.abort.abort()
     this.running.clear(); this.launchQueue.length = 0; this.deliveryQueue.clear(); this.queued.clear()
+    for (const waiter of this.slotWaiters.splice(0)) waiter.wake()
     for (const wake of this.idleWaiters.splice(0)) wake()
   }
 
@@ -1022,20 +1025,25 @@ export class T3Executor implements ExecutorRuntime {
   }
 
   private acquire(assignmentId: string): Promise<void> {
-    const limit = this.settings().executor.maxWorkers
+    const limit = this.options.maxWorkers ?? this.settings().executor.maxWorkers
     if (this.held.size < limit || this.held.has(assignmentId)) { this.held.add(assignmentId); return Promise.resolve() }
     return new Promise(resolve => {
       const wait = (): void => {
         if (this.held.size < limit) resolve()
-        else this.slotWaiters.push(wait)
+        else this.slotWaiters.push({ assignmentId, wake: wait })
       }
       wait()
     })
   }
 
   private release(assignmentId: string): void {
-    if (!this.held.delete(assignmentId)) return
-    this.slotWaiters.shift()?.()
+    // A stopped Assignment that still waits for a slot leaves the queue; wake it so the launch pump can drop it.
+    if (!this.held.delete(assignmentId)) {
+      const waiting = this.slotWaiters.findIndex(waiter => waiter.assignmentId === assignmentId)
+      if (waiting >= 0) this.slotWaiters.splice(waiting, 1)[0]!.wake()
+      return
+    }
+    this.slotWaiters.shift()?.wake()
   }
 
   private busy(): boolean {

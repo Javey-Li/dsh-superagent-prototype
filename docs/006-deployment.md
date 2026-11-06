@@ -158,7 +158,7 @@ Setup must succeed before polling or work starts. Overview lists missing require
 
 ### T3 executor
 
-The Executor settings choose a backend with `backend`: `dsh` (the default) runs each Assignment in a DSH worker Session, while `t3` runs it in a T3 Code thread. T3 settings live under `executor.t3`: `bin`, `mcpUrl`, `project`, `provider`, `model` and `ghConfigDir`. The MCP token is read from `T3_MCP_TOKEN` (or `T3_MCP_ACCESS_TOKEN`) and is never stored in settings.
+The Executor settings choose a backend with `backend`: `dsh` (the default) runs each Assignment in a DSH worker Session, `t3` runs it in a T3 Code thread, and `composite` routes each Ticket by its Mandate `line` — `write` to T3, `read` to a DSH worker. The composite backend keeps at most two T3 write Assignments per instance and queues the rest; read concurrency stays on `executor.maxWorkers`. T3 settings live under `executor.t3`: `bin`, `mcpUrl`, `project`, `provider`, `model` and `ghConfigDir`. The MCP token is read from `T3_MCP_TOKEN` (or `T3_MCP_ACCESS_TOKEN`) and is never stored in settings.
 
 ```sh
 rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.blocks.executor.revision')

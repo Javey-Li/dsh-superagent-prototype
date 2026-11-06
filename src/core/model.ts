@@ -94,6 +94,8 @@ export const settled = (decision: Pick<Decision, 'kind' | 'reason'>): boolean =>
   && !decision.reason.some(reason => ['stopNotExplicit', 'stopUnknown', 'routed'].includes(reason.code))
 
 export type Strength = 'explicit' | 'inferred'
+/** Which executor line carries an accepted Ticket: write work goes to T3, read work to a DSH worker. */
+export type WorkLine = 'read' | 'write'
 /** The cells of a receiving scope's row in the admission table, by whether the sender is listed and addresses the agent. */
 export type AdmissionCell = 'listedUnaddressed' | 'unlistedAddressed' | 'unlistedUnaddressed'
 /**
@@ -130,7 +132,12 @@ export interface Mandate {
   basis: MandateBasis
   actor: ActorRef
   scope: string
+  /** Which executor line carries the work; absent on legacy Mandates, which read as `read`. */
+  line?: WorkLine
 }
+
+/** The executor line of a Mandate; missing values from older stores read as the safe default, `read`. */
+export const workLine = (mandate: Pick<Mandate, 'line'>): WorkLine => mandate.line === 'write' ? 'write' : 'read'
 
 /** Active trigger evaluation on a thread; at most one exists per thread. */
 export interface Evaluation {

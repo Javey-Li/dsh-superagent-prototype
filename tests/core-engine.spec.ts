@@ -896,6 +896,15 @@ describe('attach', () => {
   })
 })
 describe('direct decisions', () => {
+  it('records the Mandate line from the accept, defaulting to read', () => {
+    const h = harness()
+    h.engine.receive(trigger('1'))
+    h.engine.receive(trigger('2', { threads: [{ source: 'chat', id: 't2' }] }))
+    const read = h.engine.decide('1', { kind: 'accept', title: 'Read', scope: 'small', reason: 'routed' })
+    const write = h.engine.decide('2', { kind: 'accept', title: 'Write', scope: 'small', reason: 'routed', line: 'write' })
+    expect(h.repo.tickets.get(read.ticketId!)?.mandate.line).toBe('read')
+    expect(h.repo.tickets.get(write.ticketId!)?.mandate.line).toBe('write')
+  })
   it('decides an explicit request no Eval holds in a direct Eval, refuses a proactive accept without matched rules, and accepts a Trigger once', () => {
     const h = harness()
     h.engine.receive(trigger('1'))

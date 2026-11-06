@@ -15,7 +15,7 @@ flowchart TB
   engine -->|Policy| policy[Policy]
   engine -->|SourceScope| registry[SourceRegistry]
   engine -->|Assessor| assessor[MasterAssessor]
-  engine -->|Executor| executor[DshExecutor]
+  engine -->|Executor| executor[CompositeExecutor]
   assessor -->|decide| engine
   engine -->|Outbox| outbox[Outbox]
   executor -->|assignmentStarted, inputsDelivered, report| engine
@@ -194,7 +194,9 @@ Plugins receive `SourceHost`: the registry and `context(kind)`. The kind itself 
 
 That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries.
 
-### DshExecutor
+### CompositeExecutor and DshExecutor
+
+`CompositeExecutor` (`src/executor/composite.ts`) is the Executor Runtime for dual-line deployments. It reads the Ticket's `mandate.line`: `write` goes to `T3Executor`, and `read` or a missing line goes to `DshExecutor`. Both backends keep their own queues and counts. Runtime gives the T3 side `maxWorkers: WRITE_LIMIT` (2), so a third write Assignment waits in `pending` without opening a T3 thread; the read line keeps using `executor.maxWorkers`. A stop or retry releases the write slot before the replacement Assignment is queued, and stopping a still-queued Assignment wakes it so the launch pump can drop it.
 
 `DshExecutor` (`src/executor/dsh.ts`) provides one Session and directory per Ticket. `start` and `deliver` enqueue `launch` and `delivery` effects. `stop` cancels the turn through `Store.afterCommit`, so a rolled-back end does not stop the worker.
 
@@ -354,6 +356,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/backend.ts` | `ExecutorRuntime`, the prepare/install/resume/shutdown lifecycle Runtime selects for one backend |
 | `src/executor/t3.ts` | The T3Executor, its MCP-first/CLI-fallback adapter, durable Assignment-to-thread binding, `psa-report` parsing, and the T3 doctor |
+| `src/executor/composite.ts` | The CompositeExecutor: routes Mandates with `line: 'write'` to T3 and all other work to DSH, with a two-Assignment T3 write quota |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
@@ -416,6 +419,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
 | `tests/t3-executor.spec.ts` | The T3 executor: existing-worktree binding, idempotent launch, thread continuity, input delivery, interruption, identity checks, CLI fallback, and the `psa-report` parser |
+| `tests/composite-executor.spec.ts` | Composite routing by Mandate line, the two-write quota and its release on stop and retry, and the independent read line |
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |
 | `tests/effects.spec.ts` | The effect queue: coalescing, limits, retries with backoff, health and shutdown |
 | `tests/passes.spec.ts` | Passes: one at a time, the ones asked for during a pass run as one after it, and the runtime health a failed pass reports |

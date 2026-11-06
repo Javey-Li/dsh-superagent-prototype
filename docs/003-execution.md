@@ -54,6 +54,10 @@ A failed command fails the Ticket and records its output. A retry or a person's 
 
 ### Concurrency
 
+An accepted Mandate records its `line`: `write` work runs in T3, and `read` work runs in a DSH worker. Assessments and explicit routing default to `read`; `write` requires an explicit request to change this repository, or a matched Policy rule that authorizes implementation.
+
+Each instance runs at most two write Assignments in T3 at once. A third write Assignment stays `pending` and opens no T3 thread. The read line is separate: its slots come from `executor.maxWorkers`, and read work never consumes a write slot or moves to T3 when the write line is full.
+
 A Ticket holds a worker slot from the start of a launch, including preparation, or from the delivery that wakes its idle Executor. It also holds the slot throughout an active turn.
 
 The configured concurrency limit applies to these slots, with one extra slot for a person's message or a status request. Such a wake can use the extra slot when normal slots are full, and takes the next free slot before a new launch. New work therefore cannot prevent a person from continuing an existing Ticket.
