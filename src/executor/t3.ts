@@ -7,7 +7,7 @@
  */
 import { spawn as nodeSpawn, type SpawnOptions } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { z } from 'zod'
@@ -19,6 +19,7 @@ import type { HealthEntry } from '../infra/health.ts'
 import { agentVariables, workerBin } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
+import type { Variable } from '../app/execution-environment.ts'
 import { batchLine, batchOf, inputMessage as inputTextOf, mandateInstructions, ticketExecution, triggerMessage } from './dsh.ts'
 import type { ExecutorRuntime } from './backend.ts'
 
@@ -31,6 +32,7 @@ export const T3_DEFAULT_MODEL = 'auto/dfmodel'
 const MCP_PROTOCOL_VERSION = '2025-06-18'
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 const WAIT_SLICE_MS = 300_000
+const PREPARE_TIMEOUT_MS = 180_000
 const TERMINAL_STATUS = new Set(['completed', 'failed', 'interrupted', 'cancelled', 'rolled_back'])
 const RUNNING_STATUS = new Set(['preparing', 'queued', 'starting', 'running'])
 
@@ -357,6 +359,8 @@ export interface T3ExecutorHost {
   readonly machine: Pick<Machine, 'stateDir'>
   readonly lifetime: AbortSignal
   readonly health?: HealthEntry
+  /** Execution environment variables for `ticket`, passed to its workspace prepare command. */
+  environment(ticket: Ticket): Variable[]
   /** The resolved deployment; throws while setup is not configured. */
   deployment(): Pick<Deployment, 'github' | 'stateDir'>
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
@@ -593,6 +597,27 @@ export class T3Executor implements ExecutorRuntime {
     return project
   }
 
+  /**
+   * Runs the configured `executor.prepare` command before the first T3 launch.
+   * An existing directory counts as prepared, matching the DSH executor; a failed prepare fails the Ticket instead of
+   * letting T3 bind the project root or an incomplete worktree.
+   */
+  private async prepareDirectory(ticket: Ticket): Promise<void> {
+    const directory = ticket.execution?.directory
+    if (!directory || existsSync(directory)) return
+    const command = this.settings().executor.prepare.trim()
+    if (!command) return
+    mkdirSync(dirname(directory), { recursive: true })
+    const ticketEnv = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
+    const result = await runCommand({ command: 'sh', args: ['-c', command], timeoutMs: PREPARE_TIMEOUT_MS, spawnImpl: this.spawnImpl,
+      env: { ...this.environment(), ...ticketEnv }, cwd: dirname(directory) })
+    if (!result.ok) {
+      const output = firstLine(result.stderr) || firstLine(result.stdout) || result.error || `exit ${result.code}`
+      throw new T3ExecutorError('T3_PREPARE_FAILED', `The prepare command failed: ${output}`, { directory })
+    }
+    if (!existsSync(directory)) throw new T3ExecutorError('T3_PREPARE_FAILED', `The prepare command did not create ${directory}`, { directory })
+  }
+
   private async mcpAvailable(): Promise<boolean> {
     const nowMs = Date.now()
     if (this.mcpProbe && nowMs < this.mcpProbe.until) return this.mcpProbe.ok
@@ -692,6 +717,7 @@ export class T3Executor implements ExecutorRuntime {
     if (!ticket || !liveTicket(ticket) || assignment?.id !== job.assignmentId || assignment.state !== 'pending') return false
     if (this.host.closing() || this.stopping) return false
     await this.identity()
+    await this.prepareDirectory(ticket)
     const project = await this.projectFor(ticket)
     const message = await this.assignmentMessage(ticket, assignment)
     const existing = this.threadOf(ticket.id)
@@ -722,7 +748,8 @@ export class T3Executor implements ExecutorRuntime {
     if (await this.mcpAvailable()) {
       try {
         const projectId = await this.resolveProjectId(project)
-        const result = await this.mcp.callTool('t3_thread_launch', { projectId, title, message, modelSelection: { instanceId: provider, model },
+        const result = await this.mcp.callTool('t3_thread_launch', { projectId, title, message,
+          modelSelection: { instanceId: provider, model },
           ...(worktree ? { workspaceStrategy: { type: 'existing_worktree', worktreePath: worktree } } : {}), clientRequestId: assignment.id },
         { timeoutMs: this.timeouts.launch })
         const threadId = typeof result.threadId === 'string' ? result.threadId : typeof result.id === 'string' ? result.id : ''

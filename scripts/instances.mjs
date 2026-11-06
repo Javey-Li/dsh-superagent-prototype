@@ -164,7 +164,18 @@ function urlOf(entry) {
   return `http://${entry.host}:${entry.port}`
 }
 
+function seedTmux(entry) {
+  const values = { ...entry.env }
+  if (process.env.T3_MCP_TOKEN) values.T3_MCP_TOKEN = process.env.T3_MCP_TOKEN
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) continue
+    const result = spawnSync('tmux', ['set-environment', '-g', key, String(value)], { stdio: 'ignore' })
+    if (result.error) return
+  }
+}
+
 function service(entry, action, options = {}) {
+  seedTmux(entry)
   return run('python3', [SERVICE, action, '--profile', entry.profile, '--url', urlOf(entry)],
     { env: { ...process.env, ...entry.env }, ...options })
 }

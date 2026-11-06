@@ -21,37 +21,51 @@ node scripts/instances.mjs stop fretsense
 | URL | `http://127.0.0.1:3082` |
 | State | `~/.dsh/state/superagent-fretsense` |
 | Repository | `Javey-Li/FretSense` |
+| Executor | `composite`: write → T3, read → DSH worker |
 | Worker limit | `2` |
 | Checkout for prepare | `/Users/javeyli/Projects/FretSense` |
 
 The prepare command creates one worktree per Ticket under the default `<stateDir>/work` root and uses the worker git configuration written by setup.
 
+## T3 write line
+
+The composite executor sends write Mandates to a headless T3 server and read Mandates to a DSH worker. Keep the headless server on its own base directory so the desktop T3 app is untouched:
+
+```sh
+GH_CONFIG_DIR=~/.config/gh-agent t3 serve --port 3778 --host 127.0.0.1 \
+  --base-dir ~/.t3-superagent --no-browser
+t3 project add /Users/javeyli/Projects/FretSense --title FretSense --base-dir ~/.t3-superagent
+T3_MCP_TOKEN=$(t3 auth session issue --base-dir ~/.t3-superagent --label dsh-superagent-w1 \
+  --ttl 7d --scope orchestration:read --scope orchestration:operate --token-only)
+export T3_MCP_TOKEN
+node scripts/instances.mjs restart fretsense
+```
+
+`instances.mjs` seeds `defaults.env` and the exported `T3_MCP_TOKEN` into the tmux server environment before restarting, so the service process receives them. `executor.t3` points at `http://127.0.0.1:3778/mcp`, `ghConfigDir: /Users/javeyli/.config/gh-agent`, provider `magpie-codex`, model `auto/dfmodel`. The token is read from `T3_MCP_TOKEN` and is never stored in `deploy/projects.json`.
+
+The server process was checked for `GH_CONFIG_DIR=/Users/javeyli/.config/gh-agent`, and a T3 thread asked to run `gh api user --jq .login` returned `javey-agent`.
+
 ## Model route
 
 The profile declares one `llm-pi-ai` route named `magpie` with `api: openai-completions` at `http://127.0.0.1:3425/v1`, and makes `workbuddy/deepseek-v4.1-flash` the profile default. A direct Chat Completions request to Magpie returns `OK`; a temporary headless DSH profile using the same route returned `MAGPIE_OK`.
 
-pi-ai requires a credential reference even when the endpoint accepts any bearer value. `defaults.env` supplies the non-secret placeholder `MAGPIE_API_KEY=local`, and `instances.mjs start` exports it to the service. Replace it with a real key if Magpie starts checking authentication.
+pi-ai requires a credential reference even when the endpoint accepts any bearer value. `defaults.env` supplies the non-secret placeholders `MAGPIE_API_KEY=local` and `MAGPIE_GATEWAY_KEY=local`, and `instances.mjs start` exports them to the service. Replace them with real keys if Magpie starts checking authentication. The profile's merged Magpie route uses `MAGPIE_GATEWAY_KEY`; the alias keeps both the minimal generated patch and the merged provider catalog serviceable.
 
-## Pilot boundary with the owner account
+## Requester and agent accounts
 
-The owner account can run setup: `gh api user` is `Javey-Li`, and `Javey-Li/FretSense` reports `ADMIN`/`push`. That is not enough for a one-account pilot. The GitHub Source drops every Issue, pull request and comment authored by the agent login before it reaches the Policy (`src/sources/github.ts`, the `sameName(item.user.login, login)` checks). When the agent CLI and the requester are both `Javey-Li`, every request from that account is dropped, so no Ticket can be created. A dedicated agent account, or a second requester account, is required; only the owner can create or invite it.
+The agent runs as `javey-agent` through `GH_CONFIG_DIR=~/.config/gh-agent`; `Javey-Li/FretSense` reports `permissions.push: true` for that account. The only allowed requester remains `Javey-Li`.
 
-`~/.local/bin/gh-agent` exists for the pilot. It sets `GH_CONFIG_DIR` to `~/.config/gh-agent` and, when that directory has no login, falls back to the owner's existing `gh auth token` through `GH_TOKEN`. This keeps the identity boundary explicit without copying a token file. Replace the fallback with `gh-agent auth login` before using a dedicated agent account.
+The GitHub Source drops every Issue, pull request and comment authored by the agent login before it reaches the Policy (`src/sources/github.ts`, the `sameName(item.user.login, login)` checks). The owner must write the request and mention `@javey-agent`; a request authored by `javey-agent` is ignored by design.
 
-An empty `GH_CONFIG_DIR` is not signed in on its own:
-
-```text
-$ GH_CONFIG_DIR=~/.config/gh-agent gh api user
-To get started with GitHub CLI, please run:  gh auth login
-```
-
-The fallback identity is still the owner:
+`~/.local/bin/gh-agent` only selects the agent configuration directory and never falls back to the operator token:
 
 ```text
 $ ~/.local/bin/gh-agent api user --jq .login
-Javey-Li
+javey-agent
 ```
+
+This separation is what lets the owner submit work while the executor commits and pushes as the agent account.
 
 ## Worker permissions
 
-`Sessions.ensure` sets every managed Session to `danger-full-access` (`src/app/sessions.ts`). `maxWorkers` is therefore the only concurrency guard; this instance keeps it at `2` for the pilot. For real isolation, run the agent under a dedicated OS account that holds only the agent credentials.
+`Sessions.ensure` sets every managed Session to `danger-full-access` (`src/app/sessions.ts`). Read work uses `executor.maxWorkers`, and the composite executor caps T3 write work at `WRITE_LIMIT` (2). This instance keeps `maxWorkers` at `2` for the pilot. For real isolation, run the agent under a dedicated OS account that holds only the agent credentials.

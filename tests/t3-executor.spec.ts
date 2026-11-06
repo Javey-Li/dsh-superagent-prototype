@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -78,7 +78,7 @@ interface Harness {
     read: [string, string[]][]; turns: [string, string][] }
 }
 
-function harness(t: Ticket, report: WorkerReport | string = { state: 'ready', summary: 'done' }) {
+function harness(t: Ticket, report: WorkerReport | string = { state: 'ready', summary: 'done' }, settings = SettingsSchema.parse({})) {
   const dir = tempDir()
   const repo = new MemoryRepositories()
   repo.tickets.save(t); repo.triggers.save(trigger('tr1')); repo.triggers.save(trigger('tr2'))
@@ -121,10 +121,10 @@ function harness(t: Ticket, report: WorkerReport | string = { state: 'ready', su
     report: vi.fn((ticketId: string, value: WorkerReport) => { reports.push([ticketId, value]); return repo.tickets.get(ticketId)! }),
   }
   const host: T3ExecutorHost = {
-    engine: api, store: { tickets: repo.tickets, triggers: repo.triggers, settings: () => SettingsSchema.parse({}) },
+    engine: api, store: { tickets: repo.tickets, triggers: repo.triggers, settings: () => settings },
     machine: { stateDir: dir }, lifetime: new AbortController().signal,
     deployment: () => ({ github: { cli: 'gh', login: 'agent', noreply: 'agent@users.noreply.github.com' }, stateDir: dir }),
-    sourceLink: async () => ({}), repliedTo: () => undefined, closing: () => false,
+    environment: () => [], sourceLink: async () => ({}), repliedTo: () => undefined, closing: () => false,
   }
   return { repo, host, engine, fetchImpl: fake.fetchImpl, mcpCalls: fake.calls, dir }
 }
@@ -148,6 +148,20 @@ describe('T3 executor', () => {
     expect(h.engine.started).toEqual([['t1', 'a1']])
     expect(h.engine.reports.at(-1)).toEqual(['t1', { state: 'ready', summary: 'done' }])
     expect(h.engine.turns).toContainEqual(['t1', 'a1'])
+  })
+
+  it('runs the prepare command before launch and leaves the runtime mode to the MCP parent', async () => {
+    const dir = tempDir()
+    const worktree = join(dir, 'worktree')
+    const t = ticket({ execution: { name: 'fix', directory: worktree, assignment: 'do the work' } })
+    const h = harness(t, { state: 'ready', summary: 'done' }, SettingsSchema.parse({ executor: { prepare: `mkdir -p ${JSON.stringify(worktree)}` } }))
+    const run = executor(h)
+    run.start(t, t.assignments[0]!)
+    await run.idle()
+    expect(existsSync(worktree)).toBe(true)
+    const launch = h.mcpCalls.find(call => call.method === 'tools/call' && call.params.name === 't3_thread_launch')
+    expect(launch?.params.arguments.runtimeMode).toBeUndefined()
+    expect(launch?.params.arguments.workspaceStrategy).toEqual({ type: 'existing_worktree', worktreePath: worktree })
   })
 
   it('does not create a second thread for the same assignment, and continues the ticket thread on retry', async () => {
