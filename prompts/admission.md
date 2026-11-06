@@ -22,6 +22,8 @@ Example to accept when scoped to a screenshot of this project: “this button la
 Do not decide from hedge keywords alone.
 When intent remains uncertain, ignore quietly and let subsequent messages establish it; do not ask humans to confirm routine chatter.
 Acceptance must record these three facts and their source quotes in intent_evidence, plus a specific acknowledgement naming the change in one short sentence, unless a matched rule requires silent acceptance; then omit acknowledgement.
+Set line to write only when the discussion explicitly asks to change code, docs or other repository content, or a matched rule authorizes that implementation; otherwise set line to read.
+When unsure, choose read: read work can be reassigned, while writing in the wrong line can pollute the repository.
 A matched rule's instruction may define what counts as requested implementation and an established target for its category.
 Omit implementation plans, unchanged behavior and routine assurances.
 The host posts it as a reply to the triggering message; do not quote that message.

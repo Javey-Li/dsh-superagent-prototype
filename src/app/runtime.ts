@@ -22,6 +22,7 @@ import { environmentOf, ticketEnvironment, type Variable } from './execution-env
 import type { SetupProblem } from '../setup.ts'
 import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { T3Executor } from '../executor/t3.ts'
+import { CompositeExecutor, WRITE_LIMIT } from '../executor/composite.ts'
 import type { ExecutorRuntime } from '../executor/backend.ts'
 import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
@@ -129,13 +130,15 @@ export class Runtime extends Service implements SourceHost {
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
       // One worker health entry belongs to whichever backend Runtime selected at startup.
       const workerHealth = board.claim('worker')
-      this.executor = store.settings().executor.backend === 't3'
-        ? new T3Executor({ get engine() { return runtime.engine }, store, machine, lifetime: this.lifetime, health: workerHealth,
-          deployment: () => setup.deployment, sourceLink: link, repliedTo: trigger => repliedTo({ store, sources }, trigger),
-          closing: () => this.closing() })
-        : new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: workerHealth, machine,
-          lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
-          repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+      const t3 = (options: { maxWorkers?: number } = {}) => new T3Executor({ get engine() { return runtime.engine }, store, machine,
+        lifetime: this.lifetime, health: workerHealth, deployment: () => setup.deployment, sourceLink: link,
+        repliedTo: trigger => repliedTo({ store, sources }, trigger), closing: () => this.closing() }, options)
+      const dsh = () => new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: workerHealth, machine,
+        lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
+        repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+      const backend = store.settings().executor.backend
+      this.executor = backend === 'composite' ? new CompositeExecutor(t3({ maxWorkers: WRITE_LIMIT }), dsh())
+        : backend === 't3' ? t3() : dsh()
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })

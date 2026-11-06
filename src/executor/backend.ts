@@ -3,7 +3,8 @@ import type { AssessmentOutcome, Executor, Ticket } from '../core/index.ts'
 
 /**
  * An executor that Runtime can prepare, start, resume, stop, and dispose.
- * Runtime selects one backend at startup: the in-process DSH worker, or a T3 Code thread.
+ * Runtime selects one backend at startup: the in-process DSH worker, a T3 Code thread, or a composite that routes each
+ * Ticket by its Mandate line.
  */
 export interface ExecutorRuntime extends Executor {
   /** Populate a newly accepted ticket's execution metadata before the Engine stores it. */

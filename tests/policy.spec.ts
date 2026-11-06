@@ -288,7 +288,9 @@ describe('assessment outcomes', () => {
   it('accepts an inferred candidate on its matched rules in auto mode only, and the Policy admits only enabled matched rules', () => {
     const auto = settings('auto')
     const outcome = assessmentOutcome(accept(auto), auto, 'inferred')
-    expect(outcome).toMatchObject({ kind: 'accept', rules: auto.policy.rules.filter(rule => rule.enabled).map(rule => rule.id), name: 'fix-copy' })
+    expect(outcome).toMatchObject({ kind: 'accept', rules: auto.policy.rules.filter(rule => rule.enabled).map(rule => rule.id), name: 'fix-copy',
+      line: 'read' })
+    expect(assessmentOutcome({ ...accept(auto), line: 'write' }, auto, 'inferred')).toMatchObject({ kind: 'accept', line: 'write' })
     expect(assessmentOutcome(accept(settings('observe')), settings('observe'), 'inferred'))
       .toMatchObject({ kind: 'ignore', reason: { code: 'observed', values: { text: 'asked' } }, audit: { would_accept: true } })
     expect(assessmentOutcome(accept(auto, false), auto, 'inferred')).toMatchObject({ kind: 'ignore', reason: { code: 'noRuleMatched' } })

@@ -51,6 +51,7 @@ const RouteItemSchema = z.object({
   title: z.string().nullish().describe('accept: a short label of at most 200 characters describing the original request; no added requirements or implementation advice.'),
   worktree_name: z.string().nullish().describe(`accept: ${WorktreeNameSchema.description ?? ''}`),
   acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
+  line: z.enum(['read', 'write']).nullish().describe('accept: write only when the person explicitly asks to change this repository, or a matched rule authorizes implementation; otherwise read. Defaults to read.'),
   note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ''}`),
   reason: z.string().nullish().describe('ignore and stop: why, at most 500 characters; an ignore needs it.'),
 }).strict()
@@ -63,6 +64,7 @@ const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: r
   title: { check: z.string().max(200), reads: ['accept'], needs: ['accept'] },
   worktree_name: { check: WorktreeNameSchema, reads: ['accept'], needs: ['accept'] },
   acknowledgement: { check: AcknowledgementSchema, reads: ['accept'], needs: ['accept'] },
+  line: { check: z.enum(['read', 'write']), reads: ['accept'], needs: [] },
   note: { check: RoutingNoteSchema, reads: ['accept', 'attach'], needs: [] },
   reason: { check: z.string().max(500), reads: ['ignore', 'stop'], needs: ['ignore'] },
 }
@@ -95,7 +97,7 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
     case 'accept': {
       const before = host.store.triggers.disposition(item.trigger_id)?.decisionId
       const decision = host.engine.decide(item.trigger_id, { kind: 'accept', title: item.title!, scope: item.title!, reason: { code: 'explicitRouted' },
-        acknowledgement: item.acknowledgement!, name: item.worktree_name!, ...note })
+        acknowledgement: item.acknowledgement!, name: item.worktree_name!, line: item.line ?? 'read', ...note })
       // A Decision that created no ticket is the item's refusal; one that existed before keeps what it was accepted with.
       if (decision.kind !== 'accept' || !decision.ticketId) return { refused: `Ticket was not created: ${reasonText(decision.reason)}` }
       if (decision.id === before) {
