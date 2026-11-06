@@ -239,6 +239,7 @@ T3 执行器要实现三个动作：
 - `blocked` 和 `failed` 不结束 Ticket，等人。
 - `waiting` 表示线程在等外部事件（CI、PR watch 之类），不是对人的提问：router 报 `waiting` 后继续 follow 同一个线程，外部事件唤醒的新 run 的最终 Report 才是 Ticket 的最终状态。旧版本把 waiting 报成 `blocked` 加一句「Answer the T3 thread question…」，已经存在的这类 Attention 在 router 重启时自动清除。
 - 最终 Report 的 summary 里出现本仓库 `https://github.com/<owner>/<repo>/pull/<n>` 链接时，router 按 GitHub Source 的 claim 规则把 PR 绑到 Ticket，PR 合并或关闭后 Ticket 按底座规则结束。`ready` 报告里的 PR 绑不上时，整个报告拒收为 `blocked`，交给主人处理。
+- 试点/测试期收口：最新 report 为 `failed` 的工单，失败之后超过 24 小时没有新输入，且没有待回答的问题、没有 running Assignment、没有投递错误，router 自动把它结束为 `dropped`（面板归「已过去」，口径与 L4 一致）。router 每小时检查一次，重启时也检查。旧格式 psa-report 不加兼容，严格校验保留。
 
 ## 5. 增量二：psa-report 协议
 
