@@ -34,6 +34,7 @@ import { overview } from '../src/app/views/overview.ts'
 import { preview, readable } from '../src/app/views/text.ts'
 import { decisionList, search, threadDetail, threadList } from '../src/app/views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
+import { RoleSpecSchema } from '../src/roles.ts'
 
 let runtime: Runtime
 const viewsOf = (value: Runtime) => ({ store: value.store, sources: value.sources, links: value.links() })
@@ -1797,4 +1798,35 @@ it('keeps the Policy the main Session judges by in its prompt, after admission a
   await runtime.settings.save('policy', { ...saved.policy, rules: rules.map(rule => ({ ...rule, enabled: false })) }, runtime.store.blockRevision('policy'), 'panel')
   expect(policy()).toContain('No rule is enabled: a proactive candidate can only be ignored.')
   expect(policy()).toContain('The accept mode and the rules decide proactive candidates only')
+})
+
+it('creates a scheduled observer Session under the observer profile and gives it only read or fixed-role tools', async () => {
+  const ticketId = 'observer-role-test', sessionId = `worker-${ticketId}`
+  const role = RoleSpecSchema.parse({
+    id: 'fretsense-user-sim', project: 'FretSense', policyRule: 'fretsense-user-sim', executorProfile: 'observer',
+    instructions: 'Run the fixed FretSense paths. Publish at most one Issue and never edit the checkout.',
+    target: 'http://127.0.0.1:4173', checkout: '/tmp/fretsense-readonly', artifactRoot: '/tmp/fretsense-role-runs',
+    github: { repository: 'Javey-Li/FretSense', cli: 'gh', configDir: join(directory, 'agent-gh'), login: 'javey-agent' },
+  })
+  const origin: Trigger = { id: `schedule:${role.id}:slot`, source: 'schedule', threads: [{ source: 'schedule', id: role.id }],
+    actor: { source: 'schedule', id: '' }, human: false, at: '2026-11-06T17:30:00.000Z', text: 'Nightly FretSense role run',
+    meta: { role: role.id, roleSpec: role, slot: '2026-11-07T02:30:00+09:00' } }
+  runtime.store.triggers.save(origin)
+  runtime.store.tickets.save({ id: ticketId, title: 'Nightly FretSense user simulation', decisionId: 'decision-observer',
+    mandate: { strength: 'inferred', policyVersion: '', basis: { via: 'admission', cell: 'unlistedUnaddressed',
+      observation: { mode: 'auto' }, rules: [role.policyRule] },
+      actor: origin.actor, scope: 'Read-only seven-path run', role: role.id, executorProfile: 'observer', line: 'read',
+      limits: role.limits },
+    channels: [], assignments: [], inputs: [], undelivered: [], createdAt: origin.at, updatedAt: origin.at,
+    origin: { triggerId: origin.id, triggerIds: [origin.id] } })
+  const settings = runtime.store.settings()
+  runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, profiles: { ...settings.executor.profiles,
+    observer: { ...settings.executor.profiles.observer, model: { provider: 'worker-provider', model: 'deepseek-v4.1-flash' } } } } })
+  await runtime.sessions.ensure(sessionId, join(directory, 'observer-work'), 'Nightly observer', 'worker')
+  expect(controller.create).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId, agentPreset: 'dsh-superagent-observer' }))
+  expect(sections.get(sessionId)!.text({})).toContain('Run the fixed FretSense paths. Publish at most one Issue')
+  expect(restricts.get(sessionId)!.at(-1)).toEqual({ allow: ['read', 'read_image', 'grep', 'skill'] })
+  expect([...tools.get(sessionId)!.keys()]).toEqual(expect.arrayContaining(['orchestrator_read', 'orchestrator_report',
+    'fretsense_user_sim_run', 'fretsense_user_sim_publish']))
+  expect(tools.get(sessionId)!.has('orchestrator_ack')).toBe(false)
 })

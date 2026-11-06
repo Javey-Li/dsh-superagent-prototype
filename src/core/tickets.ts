@@ -384,7 +384,8 @@ export class Tickets extends EnginePart {
   }
   /** Add a pending Assignment; a failed delivery to the one before it no longer concerns the ticket. */
   private newAssignment(ticket: Ticket): Assignment {
-    const assignment: Assignment = { id: key('assignment', ticket.id, String(ticket.assignments.length)), state: 'pending', createdAt: this.now() }
+    const assignment: Assignment = { id: key('assignment', ticket.id, String(ticket.assignments.length)), state: 'pending',
+      ...(ticket.mandate.executorProfile ? { executorProfile: ticket.mandate.executorProfile } : {}), createdAt: this.now() }
     ticket.assignments.push(assignment)
     delete ticket.delivery
     return assignment

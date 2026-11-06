@@ -12,6 +12,7 @@ export const USER_ERRORS = {
   evalFinished: ['refused', 'Eval {eval} has finished or a later eval replaced it; decide the trigger\'s current eval'],
   notAdmissible: ['refused', 'Trigger is not admissible: {reason}'],
   notExplicit: ['refused', 'An accept through orchestrator_route is for explicit requests from allowed senders; assess proactive candidates with orchestrator_eval and orchestrator_eval_decide'],
+  roleRuleMissing: ['refused', 'Role {role} may only be accepted when the assessment matches its configured policy rule {rule}'],
   ticketStopped: ['refused', 'A person stopped this ticket; new work needs an accept through orchestrator_route'],
   mandateRevoked: ['refused', 'The current policy no longer holds this ticket\'s mandate; new work needs an accept through orchestrator_route'],
   notRetryable: ['refused', 'Only an open ticket can be retried, and only when its worker last reported failed or blocked and no person has sent a message since, or when delivering an Input to its worker failed'],

@@ -5,10 +5,11 @@
 import { LIMITS } from './limits.ts'
 import { z } from 'zod'
 import { ADMISSION_DEFAULTS, type Admission, type AdmissionCell, type AdmissionRow } from './admission.ts'
-import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffect, type SourceScope, type Strength, type Thread, type Ticket,
-  type Trigger, type ActorRef, type GateResult, type WorkLine } from './core/index.ts'
+import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffect, type RoleGrant, type SourceScope, type Strength, type Thread,
+  type Ticket, type Trigger, type ActorRef, type GateResult, type WorkLine } from './core/index.ts'
 import { sameName } from './infra/text.ts'
 import { WORKER_COMMANDS } from './infra/environment.ts'
+import { RoleSpecSchema } from './roles.ts'
 
 export const RuleIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/)
 export const RuleMatchSchema = z.object({ rule_id: RuleIdSchema, reason: z.string().trim().min(1).max(500) }).strict()
@@ -16,6 +17,7 @@ export type RuleMatch = z.infer<typeof RuleMatchSchema>
 export const RuleAssessmentSchema = RuleMatchSchema.extend({ matched: z.boolean() }).strict()
 export type RuleAssessment = z.infer<typeof RuleAssessmentSchema>
 export const AdmissionDirectionSchema = z.object({
+  work_kind: z.enum(['implementation', 'observation']).default('implementation'),
   implementation_requested: z.boolean(),
   target_basis: z.enum(['specified', 'existing-standard', 'undetermined']),
   requires_design_decision: z.boolean(),
@@ -25,7 +27,8 @@ export type AdmissionDirection = z.infer<typeof AdmissionDirectionSchema>
 /** Check whether an assessment established implementation intent and a settled target without open design decisions. */
 export function directionAllowed(value: unknown): value is AdmissionDirection {
   const result = AdmissionDirectionSchema.safeParse(value)
-  return result.success && result.data.implementation_requested && result.data.target_basis !== 'undetermined' && !result.data.requires_design_decision
+  return result.success && (result.data.work_kind === 'observation'
+    || result.data.implementation_requested && result.data.target_basis !== 'undetermined' && !result.data.requires_design_decision)
 }
 export interface Assessment {
   decision: 'accept' | 'ignore' | 'unavailable'; rule_assessments: RuleAssessment[]; direction: unknown
@@ -70,6 +73,17 @@ export const RuleSchema = z.object({ id: RuleIdSchema, name: z.string().trim().m
 export type Rule = z.infer<typeof RuleSchema>
 export const RoleModelSchema = z.object({ provider: z.string().trim().min(1), model: z.string().trim().min(1), reasoningEffort: z.string().trim().min(1).optional() }).strict()
 export type RoleModel = z.infer<typeof RoleModelSchema>
+export const ExecutorProfileConfigSchema = z.object({
+  preset: z.string().trim().min(1),
+  model: RoleModelSchema.nullable().default(null),
+  ghPolicy: z.enum(['none', 'issues']).default('none'),
+}).strict()
+export type ExecutorProfileConfig = z.infer<typeof ExecutorProfileConfigSchema>
+export const ExecutorProfilesSchema = z.object({
+  router: ExecutorProfileConfigSchema.default(() => ExecutorProfileConfigSchema.parse({ preset: 'dsh-superagent-router' })),
+  builder: ExecutorProfileConfigSchema.default(() => ExecutorProfileConfigSchema.parse({ preset: 'dsh-superagent-worker' })),
+  observer: ExecutorProfileConfigSchema.default(() => ExecutorProfileConfigSchema.parse({ preset: 'dsh-superagent-observer', ghPolicy: 'issues' })),
+}).strict()
 
 export const AllowedSchema = z.object({ id: z.string().trim().min(1).max(200), name: z.string().trim().max(100).optional() }).strict()
 const Weak = z.enum(['inferred', 'ignore'])
@@ -109,6 +123,7 @@ export const ExecutorConfigSchema = z.object({
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
+  profiles: ExecutorProfilesSchema.default(() => ExecutorProfilesSchema.parse({})),
   t3: T3ConfigSchema.default(() => T3ConfigSchema.parse({})),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
@@ -142,6 +157,16 @@ export function listedBot(settings: Settings, actor: ActorRef): z.infer<typeof A
 }
 export const anyoneAllowed = (settings: Settings): boolean => Object.values(settings.policy.sources).some(part => part.allowed.length > 0)
 const senderName = (entry: z.infer<typeof AllowedSchema>): string => entry.name || entry.id
+/** Read the RoleSpec carried by a trusted scheduled Trigger, limited to profiles configured on this installation. */
+function scheduledRole(settings: Settings, trigger: Trigger): RoleGrant | undefined {
+  if (trigger.source !== 'schedule') return undefined
+  const spec = RoleSpecSchema.safeParse(trigger.meta.roleSpec)
+  if (!spec.success || trigger.meta.role !== spec.data.id) return undefined
+  const profile = settings.executor.profiles[spec.data.executorProfile]
+  const rule = settings.policy.rules.find(item => item.id === spec.data.policyRule)
+  if (!profile || !rule?.enabled) return undefined
+  return { id: spec.data.id, policyRule: spec.data.policyRule, executorProfile: spec.data.executorProfile, limits: spec.data.limits }
+}
 
 /** Check whether a thread has tickets of its own (excluding context-only subscriptions). */
 const participating = (thread: Thread, tickets: Ticket[]): boolean =>
@@ -185,6 +210,15 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
   const mode = settings.eval.mode
   /** Gate non-human triggers: only listed bots (as inferred candidates) and senderless system/CI events may pass; other bots are rejected. */
   const machineGate = (trigger: Trigger): GateResult => {
+    const role = scheduledRole(settings, trigger)
+    if (trigger.meta.role !== undefined && !role) return { admissible: false, reason: 'role_disabled' }
+    if (role) {
+      if (mode === 'off') return { admissible: false, reason: 'admission_ignored' }
+      const scope = listened(sources, trigger.source, trigger.meta)
+      if (!scope.listened) return { admissible: false, reason: scope.reason }
+      return { admissible: true, strength: 'inferred', basis: { source: trigger.source, scope: trigger.meta,
+        ...(scope.row === undefined ? {} : { row: scope.row }), via: 'admission', cell: 'unlistedUnaddressed', observation: { mode } } }
+    }
     const bot = trigger.actor.id ? listedBot(settings, trigger.actor) : undefined
     if (trigger.actor.id && !bot) return { admissible: false, reason: 'not_human' }
     const scope = listened(sources, trigger.source, trigger.meta)
@@ -204,6 +238,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
   }
   return {
     version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
+    role(trigger) { return scheduledRole(settings, trigger) },
     gate(trigger: Trigger, thread, tickets) {
       if (!trigger.human) return machineGate(trigger)
       const allowed = allowedSender(settings, trigger.actor)
