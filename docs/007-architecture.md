@@ -322,7 +322,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/baseline.ts` | Baseline records: the three `whoSaid` levels, their provenance, and the promotion rules that keep an AI record from becoming the owner's word |
+| `src/app/baseline.ts` | Baseline records: `author`, `authority`, `evidence` and the derived three `whoSaid` levels, exact words versus summaries, mixed-author parts, global records, and the promotion rules that keep an AI record from becoming the owner's word |
 | `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
@@ -440,7 +440,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
 | `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
-| `tests/baseline.spec.ts` | Baseline records: the three `whoSaid` levels, provenance, project queries, and the refusal to promote an AI record, an Example or a non-normative record |
+| `tests/baseline.spec.ts` | Baseline records: the derived `whoSaid` levels, owner approval of pasted AI text, mixed-author parts, global records, supersede links, provenance, and the refusal to promote an AI record, an Example or a non-normative record |
 | `tests/codex-guard.spec.ts` | The host-level Codex guard: which app operations it blocks, its fixed bundle id, and the installer's one idempotent hook |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
