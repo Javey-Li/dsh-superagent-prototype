@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -7,6 +7,7 @@ import { MemoryRepositories } from '../src/core/index.ts'
 import type { Assignment, EngineForExecutor, Ticket, Trigger, WorkerReport } from '../src/core/index.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { T3Executor, parsePsaReport, type SpawnImpl, type T3ExecutorHost, type T3ExecutorOptions } from '../src/executor/t3.ts'
+import type { SourceContext } from '../src/sources/host.ts'
 
 const AT = '2026-11-07T00:00:00.000Z'
 const dirs: string[] = []
@@ -78,7 +79,8 @@ interface Harness {
     read: [string, string[]][]; turns: [string, string][] }
 }
 
-function harness(t: Ticket, report: WorkerReport | string = { state: 'ready', summary: 'done' }, settings = SettingsSchema.parse({})) {
+function harness(t: Ticket, report: WorkerReport | string = { state: 'ready', summary: 'done' }, settings = SettingsSchema.parse({}),
+  github: () => SourceContext = () => { throw new Error('github source not configured in tests') }) {
   const dir = tempDir()
   const repo = new MemoryRepositories()
   repo.tickets.save(t); repo.triggers.save(trigger('tr1')); repo.triggers.save(trigger('tr2'))
@@ -127,6 +129,7 @@ function harness(t: Ticket, report: WorkerReport | string = { state: 'ready', su
     machine: { stateDir: dir }, lifetime: new AbortController().signal,
     deployment: () => ({ github: { cli: 'gh', login: 'agent', noreply: 'agent@users.noreply.github.com', configDir: join(dir, 'gh-config') }, stateDir: dir }),
     environment: () => [], sourceLink: async () => ({}), repliedTo: () => undefined, closing: () => false,
+    github,
   }
   return { repo, host, engine, fetchImpl: fake.fetchImpl, mcpCalls: fake.calls, dir }
 }
@@ -355,6 +358,130 @@ describe('T3 executor', () => {
     await run.idle()
     expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'blocked' })
     expect(h.engine.reports.at(-1)?.[1].summary).toContain('ready 报告不能带 question')
+  })
+
+  it('keeps following the thread after a waiting report, relays the final ready report, and binds its PR', async () => {
+    const t = ticket()
+    const waiting = { schema_version: 1, report_id: 'r-wait', ticket_id: 't1', assignment_id: 'a1', state: 'waiting',
+      summary: '等 CI：PR #120 https://github.com/Javey-Li/FretSense/pull/120 的检查还在 pending。' }
+    const ready = { schema_version: 1, report_id: 'r-ready', ticket_id: 't1', assignment_id: 'a1', state: 'ready',
+      summary: '改好了，CI 全绿。PR：https://github.com/Javey-Li/FretSense/pull/120' }
+    const waitingText = `work\n\`\`\`psa-report\n${JSON.stringify(waiting)}\n\`\`\``
+    const readyText = `work\n\`\`\`psa-report\n${JSON.stringify(ready)}\n\`\`\``
+    let latest: string | null = 'run-1'
+    const h = harness(t)
+    const mcp = fakeMcp({
+      t3_project_list: () => ({ projects: [{ id: 'p1', title: 'repo', workspaceRoot: '/repo' }], nextCursor: null }),
+      t3_thread_launch: () => ({ threadId: 'thread-1', runId: 'run-1', status: 'running' }),
+      t3_thread_wait: args => ({ threadId: args.threadId, runId: args.runId, status: 'completed', timedOut: false }),
+      t3_thread_read: args => {
+        const thread = { threadId: args.threadId, status: 'idle', pendingRequestCount: 0, latestRunId: latest }
+        if (args.view === 'activity') return { thread, items: [], recentRuns: [], nextPosition: null, hasMore: false }
+        const items = latest === 'run-2'
+          ? [{ itemId: 'm1', type: 'assistant_message', runId: 'run-1', text: waitingText, textTruncated: false, nextTextOffset: null },
+            { itemId: 'm2', type: 'assistant_message', runId: 'run-2', text: readyText, textTruncated: false, nextTextOffset: null }]
+          : [{ itemId: 'm1', type: 'assistant_message', runId: 'run-1', text: waitingText, textTruncated: false, nextTextOffset: null }]
+        return { thread, items, recentRuns: [], nextPosition: null, hasMore: false }
+      },
+    })
+    const bound: [string, { source: string; id: string }, boolean][] = []
+    const pull = { number: 120, state: 'open', html_url: 'https://github.com/Javey-Li/FretSense/pull/120',
+      user: { login: 'agent', type: 'User' }, body: null, created_at: AT, merged: false, merged_at: null, closed_at: null,
+      auto_merge: null, head: { sha: 'c0ffee', ref: 'agent/fix', repo: { full_name: 'Javey-Li/FretSense' } } }
+    const github = {
+      deployment: { repository: 'Javey-Li/FretSense', github: { cli: 'gh', login: 'agent', noreply: 'agent@users.noreply.github.com' } },
+      commands: { withSignal: () => ({ api: async (_schema: unknown, _path: string) => pull }) },
+      ready: Promise.resolve(), configured: () => true, config: () => undefined,
+      receive: () => ({}), atomic: <T>(work: () => T) => work(),
+      state: { get: () => undefined, set: () => {}, keys: () => [] },
+      threads: { get: () => undefined, subscribed: () => [], describe: () => {}, patch: vi.fn() },
+      tickets: {
+        get: (id: string) => h.repo.tickets.get(id),
+        open: () => h.repo.tickets.open(),
+        bindThread: (id: string, thread: { source: string; id: string }, own: boolean) => {
+          bound.push([id, thread, own])
+          const current = h.repo.tickets.get(id)!
+          const key = `${thread.source}:${thread.id}`
+          const follow = current.follows?.find(item => item.thread === key)
+          const follows = follow
+            ? current.follows!.map(item => item.thread === key ? { ...item, own: item.own || own, closed: undefined } : item)
+            : [...(current.follows ?? []), { thread: key, own }]
+          h.repo.tickets.save({ ...current, follows })
+        },
+        threadClosed: vi.fn(),
+      },
+      triggers: { get: (id: string) => h.repo.triggers.get(id), latest: () => undefined },
+      notify: vi.fn(), report: vi.fn(),
+    }
+    const run = new T3Executor({ ...h.host, github: () => github as unknown as SourceContext },
+      { project: '/repo', mcpUrl: 'http://t3/mcp', mcpToken: 'token', fetchImpl: mcp.fetchImpl,
+        ledgerPath: join(h.dir, 'ledger.json'), verifyIdentity: false, mcpRetryMs: 0, timeouts: { followPoll: 10 } })
+    run.start(t, t.assignments[0]!)
+    await vi.waitFor(() => expect(h.engine.reports.some(item => item[1].state === 'waiting')).toBe(true))
+    // The PR watch wakes the same thread with a new run, which finishes and reports ready.
+    latest = 'run-2'
+    await run.idle()
+    expect(h.engine.reports.map(item => item[1].state)).toEqual(['waiting', 'ready'])
+    expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'ready', summary: ready.summary })
+    expect(bound).toEqual([['t1', { source: 'github', id: '120' }, true]])
+    expect(h.engine.turns).toEqual([['t1', 'a1'], ['t1', 'a1']])
+  })
+
+  it('resumes following a waiting thread after a host restart and relays its final report', async () => {
+    const t = ticket()
+    t.assignments[0] = { ...t.assignments[0]!, state: 'running',
+      report: { state: 'waiting', summary: 'T3 thread thread-1 is waiting for an external event; the executor keeps following the thread for its next run.', at: AT } }
+    const h = harness(t)
+    writeFileSync(join(h.dir, 'ledger.json'), JSON.stringify({ version: 1, entries: {},
+      threads: { t1: { threadId: 'thread-1', project: '/repo' } } }))
+    const mcp = fakeMcp({
+      t3_thread_wait: args => ({ threadId: args.threadId, runId: args.runId, status: 'completed', timedOut: false }),
+      t3_thread_read: args => ({ thread: { threadId: args.threadId, status: 'idle', pendingRequestCount: 0, latestRunId: 'run-2' },
+        items: [{ itemId: 'm2', type: 'assistant_message', runId: 'run-2',
+          text: '```psa-report\n' + JSON.stringify({ schema_version: 1, report_id: 'r-ready', ticket_id: 't1', assignment_id: 'a1',
+            state: 'ready', summary: 'done after the watch' }) + '\n```', textTruncated: false, nextTextOffset: null }],
+        recentRuns: [], nextPosition: null, hasMore: false }),
+    })
+    const run = executor(h, { fetchImpl: mcp.fetchImpl })
+    run.resume()
+    await run.idle()
+    expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'ready', summary: 'done after the watch' })
+  })
+
+  it('re-waits the same run when a pending input ended the wait, then relays its final report', async () => {
+    const t = ticket()
+    const h = harness(t)
+    let waits = 0
+    const mcp = fakeMcp({
+      t3_project_list: () => ({ projects: [{ id: 'p1', title: 'repo', workspaceRoot: '/repo' }], nextCursor: null }),
+      t3_thread_launch: () => ({ threadId: 'thread-1', runId: 'run-1', status: 'running' }),
+      t3_thread_wait: () => { waits += 1; return waits === 1
+        ? { status: 'running', timedOut: true } : { status: 'completed', timedOut: false, runId: 'run-1' } },
+      t3_thread_read: args => {
+        const thread = { threadId: args.threadId, status: 'running', pendingRequestCount: 1 }
+        if (args.view === 'activity') return { thread, items: [], recentRuns: [], nextPosition: null, hasMore: false }
+        return { thread, items: [{ itemId: 'm1', type: 'assistant_message', runId: 'run-1',
+          text: '```psa-report\n' + JSON.stringify({ schema_version: 1, report_id: 'r-approved', ticket_id: 't1',
+            assignment_id: 'a1', state: 'ready', summary: 'approved and done' }) + '\n```',
+          textTruncated: false, nextTextOffset: null }], recentRuns: [], nextPosition: null, hasMore: false }
+      },
+    })
+    const run = executor(h, { fetchImpl: mcp.fetchImpl })
+    run.start(t, t.assignments[0]!)
+    await run.idle()
+    expect(h.engine.reports.map(item => item[1].state)).toEqual(['waiting', 'ready'])
+    expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'ready', summary: 'approved and done' })
+  })
+
+  it('clears a stale fabricated waiting question on resume so the ticket shows its true stage', () => {
+    const t = ticket()
+    t.assignments[0] = { ...t.assignments[0]!, state: 'pending',
+      report: { state: 'failed', summary: 'T3_MCP_REQUIRED_FOR_WORKTREE: the CLI would launch in the project root', at: AT } }
+    t.attention = { id: 'att1', question: 'Answer the T3 thread question, then send a message to this Ticket to continue.' }
+    const h = harness(t)
+    const run = executor(h)
+    run.resume()
+    expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'failed', question: null })
   })
 })
 
