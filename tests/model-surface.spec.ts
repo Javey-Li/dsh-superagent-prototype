@@ -79,6 +79,7 @@ async function start() {
   const answers: Record<string, string> = {
     [`git -C ${directory} rev-parse --show-toplevel`]: `${directory}\n`,
     [`git -C ${directory} remote get-url --push origin`]: 'https://github.com/acme/widgets.git\n',
+    [`${join(directory, 'worker-bin', 'gh')} api user --jq .login`]: 'agent-bot\n',
     [`${AGENT} api user`]: '{"login":"agent-bot","id":7}',
     [`${AGENT} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`]: '{"name":"acme/widgets","push":true}\n',
     [`${BOT} auth status`]: JSON.stringify({ appId: 'cli_bot', brand: 'feishu', identities: { bot: { status: 'ready' } } }),

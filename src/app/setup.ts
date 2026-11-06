@@ -27,15 +27,14 @@ export class Setup {
   feishuProblem?: SetupProblem
   /** PATH with the worker shim directory removed so the host's own CLI calls invoke the real binaries. */
   private readonly path: string
-  /** Environment variables pointing agent subprocesses at the isolated git config and command shims. */
-  private readonly variables: Record<string, string | undefined>
   private restoreEnvironment?: () => void
   constructor(private readonly host: SetupHost) {
     this.path = withoutDirectory(process.env.PATH ?? '', workerBin(host.machine.stateDir))
-    this.variables = agentVariables(host.machine.stateDir)
   }
   /** Host command environment with agent git variables applied and the worker shim directory excluded from PATH. */
-  get commandEnvironment(): Record<string, string | undefined> { return { ...this.variables, PATH: this.path } }
+  get commandEnvironment(): Record<string, string | undefined> {
+    return { ...agentVariables(this.host.machine.stateDir, this.resolved?.github.configDir), PATH: this.path }
+  }
   get deployment(): Deployment {
     if (!this.resolved) throw new Error(`dsh-superagent is waiting for setup: ${this.problem?.detail ?? 'setup has not run'}`)
     return this.resolved
@@ -89,7 +88,7 @@ export class Setup {
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
     }
     await writeEnvironment(resolved, settings.executor.blockedCommands).catch(machineProblem)
-    this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
+    this.restoreEnvironment = applyEnvironment(agentVariables(machine.stateDir, resolved.github.configDir), machine.stateDir, this.path)
     await verifyEnvironment(resolved, context.subprocess, lifetime).catch((error: unknown) => {
       this.restore()
       machineProblem(error)

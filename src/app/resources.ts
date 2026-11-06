@@ -10,6 +10,7 @@ import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inp
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
 import { transcriptEntry } from './context.ts'
+import { renderTicketContext, ticketContextPackage } from './context-package.ts'
 import { builtInParts, defaultPrompts } from './prompts.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Commands } from '../infra/commands.ts'
@@ -32,6 +33,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
     + 'report, and its inputs, newest first', executor: true },
   { name: 'ticket/<id>/assignment', holds: 'its assignment text', executor: true },
   { name: 'ticket/<id>/assignments', holds: 'its assignments, newest first, with the start of each report', executor: true },
+  { name: 'ticket/<id>/summary', holds: 'one page: state, mandate, latest report, Issue/PR/review/CI associations, recent signals and recall pointers', executor: true },
   { name: 'ticket/<id>/inputs', holds: 'its inputs, newest first', executor: true },
   { name: 'ticket/<id>/result', holds: 'its latest report', executor: true },
   { name: 'ticket/<id>/report/<id>', holds: 'the report of one of its assignments', executor: true },
@@ -277,6 +279,8 @@ const ROUTES: readonly Route[] = [
       const report = ticket.assignments.find(item => item.id === part)?.report
       if (!report) throw new Error('Unknown assignment report')
       body = report.summary
+    } else if (section === 'summary' && part === undefined) {
+      body = renderTicketContext(ticketContextPackage(host.store, ticket))
     } else if (part !== undefined) throw new Error('Unknown context resource')
     else if (section === 'assignment') body = ticket.execution?.assignment ?? ''
     else if (section === 'result') body = latestReport(ticket)?.summary ?? ''

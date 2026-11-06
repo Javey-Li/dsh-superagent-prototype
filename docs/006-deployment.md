@@ -44,7 +44,15 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
    gh-agent api user --jq .login
    ```
 
-   Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
+   Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way. Set the
+   GitHub Source's **Agent gh configuration directory** to `~/.config/gh-agent` (or leave it empty to use
+   `<stateDir>/gh-config`). Setup runs `gh api user --jq .login` through the worker shim and refuses an identity other than
+   the resolved agent account.
+
+   A T3 server starts its own providers, so it does not inherit the DSH process environment. Start T3 with the same
+   `GH_CONFIG_DIR`, `GIT_CONFIG_GLOBAL=<stateDir>/worker-gitconfig`, `GIT_CONFIG_NOSYSTEM=1`, no `GH_TOKEN`/`GITHUB_TOKEN`,
+   and an empty `SSH_AUTH_SOCK`. `scripts/t3-doctor.ts` checks the listening T3 process environment; `docs/009-pilot-guard.md`
+   lists the full pilot checklist.
 
 ### Feishu bot (optional)
 

@@ -7,6 +7,8 @@ If direction is unresolved or code inspection reveals changed behavior, public i
 
 A thread attached to this ticket after it started may turn out not to be about it: read its original messages first, and if it is unrelated, call orchestrator_thread_unrelated with the thread key and a one-sentence reason; do not acknowledge it or reply there.
 Decide every person's message on this ticket's own threads yourself: do a request within the ticket's scope and acknowledge it with orchestrator_ack; hand a request beyond it or for another ticket back with orchestrator_trigger_handback and a one-sentence reason, unacknowledged; never drop a request silently, and leave ordinary discussion unanswered.
+A follow-up, review comment, or CI result delivered on this ticket's own threads is part of this ticket: take it up here, and do not ask the orchestrator to route it again or open a new ticket for it.
+When a person asks whether the work is done, answer from this ticket's summary associations (Issue, PR, review, CI) and the latest report; read `ticket/<id>/summary` first, recall older messages only as needed, and do not restart implementation for a status question.
 Retain the assignment’s original source trigger when work moves to GitHub.
 Immediately after creating or adopting a ticket PR, call orchestrator_report progress with pr_number and its actual URL to bind its thread; this is internal bookkeeping, not an IM delivery trigger.
 Continue checks and review silently until ready.

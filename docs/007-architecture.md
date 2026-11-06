@@ -331,6 +331,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/settings-history.ts` | `policyHistory`: each saved settings revision with what it changed from the one before |
 | `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, and `promptParts`, the order of a role's prompt sections |
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
+| `src/app/context-package.ts` | The deterministic one-page Ticket context: state, mandate, latest report, Issue/PR/review/CI associations, recent signals and recall pointers, under a character budget |
 | `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
 | `src/app/sessions.ts` | Sessions |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
@@ -356,7 +357,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/backend.ts` | `ExecutorRuntime`, the prepare/install/resume/shutdown lifecycle Runtime selects for one backend |
-| `src/executor/t3.ts` | The T3Executor, its MCP-first/CLI-fallback adapter, durable Assignment-to-thread binding, `psa-report` parsing, and the T3 doctor |
+| `src/executor/t3.ts` | The T3Executor, its MCP-first/CLI-fallback adapter, durable Assignment-to-thread binding, discovery of a thread a person resumed by hand, `psa-report` parsing, and the T3 doctor |
 | `src/executor/composite.ts` | The CompositeExecutor: routes Mandates with `line: 'write'` to T3 and all other work to DSH, with a two-Assignment T3 write quota |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
@@ -419,7 +420,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
-| `tests/t3-executor.spec.ts` | The T3 executor: existing-worktree binding, idempotent launch, thread continuity, input delivery, interruption, identity checks, CLI fallback, and the `psa-report` parser |
+| `tests/t3-executor.spec.ts` | The T3 executor: existing-worktree binding, idempotent launch, thread continuity, rebinding a manually resumed thread, input delivery, interruption, identity checks, CLI fallback, and the `psa-report` parser |
 | `tests/composite-executor.spec.ts` | Composite routing by Mandate line, the two-write quota and its release on stop and retry, and the independent read line |
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |
 | `tests/effects.spec.ts` | The effect queue: coalescing, limits, retries with backoff, health and shutdown |
@@ -538,7 +539,7 @@ Each Executor has six application tools:
 | `orchestrator_thread_follow` | Subscribe to a related Thread for context and tell the main Session |
 | `orchestrator_trigger_handback` | Hand back a message once, with a reason carried by its candidate |
 
-A hand-back returns `queued: false` if another Ticket still owns the message, or this Ticket never owned it. For example, a bot message went to Eval independently.
+A hand-back returns `queued: false` if another Ticket still owns the message, or this Ticket never owned it. For example, a bot message delivered directly to a live Ticket is not one this Ticket decides, so a hand-back queues nothing; a message that reached no live Ticket went to Eval independently.
 
 The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `WORK_TOOLS` in `src/app/sessions.ts` retains available file, search, shell, job, web, skill, todo and subagent tools. Workers do not receive tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
 

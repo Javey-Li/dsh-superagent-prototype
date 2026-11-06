@@ -60,10 +60,21 @@ describe('setup', () => {
   it('reads the repository from the GitHub Source and the accounts from their CLIs, skipping the worker shims', async () => {
     const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
     expect(deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })
-    expect(deployment.github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' })
+    expect(deployment.github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com',
+      configDir: join(dir, 'state', 'gh-config') })
     expect(deployment).not.toHaveProperty('feishu')
     // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
     expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
+  })
+  it('uses the configured agent gh directory and refuses the operator\'s own', async () => {
+    const configDir = join(dir, 'agent-gh')
+    expect((await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh', configDir }, probe, path)).github.configDir).toBe(configDir)
+    const operator = join(dir, '.config', 'gh')
+    vi.stubEnv('HOME', dir)
+    try {
+      await expect(resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh', configDir: operator }, probe, path))
+        .rejects.toEqual(setupError('github', 'agentConfigDirOperator', { configDir: operator }))
+    } finally { vi.unstubAllEnvs() }
   })
   it('names what setup needs and where it is set', async () => {
     const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>

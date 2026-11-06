@@ -1,6 +1,7 @@
 /** Plugin configuration and startup verification for repository access and agent CLI identities. */
 import { LIMITS } from './limits.ts'
 import { accessSync, constants, statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join } from 'node:path'
 import type { Volatile } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
@@ -45,6 +46,7 @@ export function machineOf(config: DeploymentConfig): Machine {
 export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
+  configDir: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for the isolated default').default(''),
 })
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
@@ -52,7 +54,7 @@ export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { githu
 
 export interface Deployment extends Machine {
   repository: string
-  github: { cli: string; login: string; noreply: string }
+  github: { cli: string; login: string; noreply: string; configDir: string }
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
@@ -83,6 +85,10 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
+/** The isolated gh configuration directory a CLI uses for dsh-superagent: the configured one, else one inside the state directory. */
+export function agentConfigDir(stateDir: string, configDir = ''): string {
+  return configDir || join(stateDir, 'gh-config')
+}
 /** Verify the agent's GitHub CLI identity and push access to the configured repository. */
 export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
   const { stateDir } = machine
@@ -90,9 +96,15 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   const remote = accounts.repository
   if (!remote) throw new SetupError('repositoryUnset')
   if (!accounts.cli) throw new SetupError('agentCliUnset')
+  const configDir = agentConfigDir(stateDir, accounts.configDir)
+  // The operator's own gh configuration is never an agent identity: a wrapper that only relies on it would act as the operator.
+  const operator = join(homedir(), '.config', 'gh')
+  if (accounts.configDir && sameDirectory(accounts.configDir, operator)) throw new SetupError('agentConfigDirOperator', { configDir: accounts.configDir })
   let cli: string
   try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
-  const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
+  // Read the identity through the isolated configuration the workers will use; the wrapper may set its own, and this checks that too.
+  const text = await probe(['env', `GH_CONFIG_DIR=${configDir}`, cli, 'api', 'user'])
+    .catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error), configDir }) })
   const agent = parsed(GithubUser, text)
   if (!agent) throw new SetupError('agentCliNoAccount')
   // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
@@ -102,7 +114,7 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
   const repository = access.name
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com`, configDir } }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })
