@@ -41,6 +41,11 @@ const RUNNING_STATUS = new Set(['preparing', 'queued', 'starting', 'running'])
 /** A failed Ticket with no new input for this long is past (已过去) and gets archived. */
 const EXPIRED_FAILURE_MS = 24 * 60 * 60_000
 /**
+ * Blocked reports the executor itself raised when it could not accept the worker's report. The thread may report again,
+ * so the follow keeps waiting for its next run instead of resting on the blocked state.
+ */
+const RETRYABLE_BLOCKED = ['psa-report 解析失败', 'psa-report 引用的 PR 无法绑定', 'psa-report 不符合协议'] as const
+/**
  * The question an older build put on a Ticket when a T3 thread was waiting for an external event. Current builds never ask
  * it, so any occurrence on an open Ticket is stale and superseded by the executor's later reports.
  */
@@ -516,9 +521,10 @@ export class T3Executor implements ExecutorRuntime {
       const running = runningAssignment(ticket)
       if (running) {
         const thread = this.threadOf(ticket.id)
-        // A run that reported waiting was waiting for an external event, not for the host: keep following its thread
-        // instead of interrupting it, so the next run the event wakes reports its final state.
-        if (running.report?.state === 'waiting' && thread) {
+        // A run that reported waiting was waiting for an external event, not for the host, and a blocked report the
+        // executor itself raised leaves the verdict undecided: keep following the thread instead of interrupting it, so
+        // the next run reports its final state and overwrites the old one.
+        if (running.report && thread && !ticket.attention && this.undecided(running.report)) {
           this.follow({ ticketId: ticket.id, assignmentId: running.id, threadId: thread.threadId, runId: null, inputIds: [],
             mode: this.ledger.entry(running.id)?.mode ?? 'mcp' })
           continue
@@ -1077,7 +1083,9 @@ export class T3Executor implements ExecutorRuntime {
       const report = await this.reportFor(ticketId, assignmentId, threadId, outcome, mode)
       // A stale or duplicate report ends this follow without relaying anything, as before.
       if (!report) return undefined
-      if (report.state !== 'waiting') return report
+      // A terminal worker verdict ends the follow; a waiting report or the executor's own blocked report keeps following
+      // the thread, so a later run's report reaches the Ticket and overwrites the old state.
+      if (!this.undecided(report)) return report
       this.report(ticketId, assignmentId, report)
       // The wait ended on a pending input before the run settled (such as an approval): wait the same run again,
       // whose completion reports through its own final message.
@@ -1087,6 +1095,17 @@ export class T3Executor implements ExecutorRuntime {
       if (!this.claim(assignmentId, next)) return undefined
       current = next
     }
+  }
+
+  /**
+   * Whether the worker's verdict is still undecided. A `waiting` report, or a blocked report the executor itself raised
+   * because it could not accept the worker's report, leaves the thread free to report again; a worker verdict with a
+   * question for a person is decided and ends the follow.
+   */
+  private undecided(report: WorkerReport): boolean {
+    if (report.state === 'waiting') return true
+    return report.question === undefined && report.state === 'blocked'
+      && RETRYABLE_BLOCKED.some(prefix => report.summary.startsWith(prefix))
   }
 
   private waitingReport(threadId: string): WorkerReport {

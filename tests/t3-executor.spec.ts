@@ -134,6 +134,41 @@ function harness(t: Ticket, report: WorkerReport | string = { state: 'ready', su
   return { repo, host, engine, fetchImpl: fake.fetchImpl, mcpCalls: fake.calls, dir }
 }
 
+const pr120 = { number: 120, state: 'open', html_url: 'https://github.com/Javey-Li/FretSense/pull/120',
+  user: { login: 'agent', type: 'User' }, body: null, created_at: AT, merged: false, merged_at: null, closed_at: null,
+  auto_merge: null, head: { sha: 'c0ffee', ref: 'agent/fix', repo: { full_name: 'Javey-Li/FretSense' } } }
+
+/** A minimal GitHub Source context whose claim rules bind `pull` to a ticket, recording the bindings. */
+function fakeGithubSource(repo: MemoryRepositories, pull: Record<string, unknown>) {
+  const bound: [string, { source: string; id: string }, boolean][] = []
+  const github = {
+    deployment: { repository: 'Javey-Li/FretSense', github: { cli: 'gh', login: 'agent', noreply: 'agent@users.noreply.github.com' } },
+    commands: { withSignal: () => ({ api: async (_schema: unknown, _path: string) => pull }) },
+    ready: Promise.resolve(), configured: () => true, config: () => undefined,
+    receive: () => ({}), atomic: <T>(work: () => T) => work(),
+    state: { get: () => undefined, set: () => {}, keys: () => [] },
+    threads: { get: () => undefined, subscribed: () => [], describe: () => {}, patch: vi.fn() },
+    tickets: {
+      get: (id: string) => repo.tickets.get(id),
+      open: () => repo.tickets.open(),
+      bindThread: (id: string, thread: { source: string; id: string }, own: boolean) => {
+        bound.push([id, thread, own])
+        const current = repo.tickets.get(id)!
+        const key = `${thread.source}:${thread.id}`
+        const follow = current.follows?.find(item => item.thread === key)
+        const follows = follow
+          ? current.follows!.map(item => item.thread === key ? { ...item, own: item.own || own, closed: undefined } : item)
+          : [...(current.follows ?? []), { thread: key, own }]
+        repo.tickets.save({ ...current, follows })
+      },
+      threadClosed: vi.fn(),
+    },
+    triggers: { get: (id: string) => repo.triggers.get(id), latest: () => undefined },
+    notify: vi.fn(), report: vi.fn(),
+  }
+  return { github: () => github as unknown as SourceContext, bound }
+}
+
 function executor(h: ReturnType<typeof harness>, options: Partial<T3ExecutorOptions> = {}) {
   return new T3Executor(h.host, { project: '/repo', mcpUrl: 'http://t3/mcp', mcpToken: 'token', fetchImpl: h.fetchImpl,
     ledgerPath: join(h.dir, 'ledger.json'), verifyIdentity: false, mcpRetryMs: 0, ...options })
@@ -205,7 +240,7 @@ describe('T3 executor', () => {
     })
     const run = executor(h, { fetchImpl: mcp.fetchImpl })
     run.start(t, t.assignments[1]!)
-    await run.idle()
+    await vi.waitFor(() => expect(h.engine.started).toContainEqual(['t1', 'a2']))
     expect(mcp.calls.filter(call => call.params?.name === 't3_thread_launch')).toHaveLength(0)
     expect(mcp.calls.filter(call => call.params?.name === 't3_thread_send')).toHaveLength(1)
     expect(h.engine.started).toContainEqual(['t1', 'a2'])
@@ -335,7 +370,7 @@ describe('T3 executor', () => {
     const h = harness(t, 'I finished the change, but forgot the report block.')
     const run = executor(h)
     run.start(t, t.assignments[0]!)
-    await run.idle()
+    await vi.waitFor(() => expect(h.engine.reports.some(item => item[1].state === 'blocked')).toBe(true))
     expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'blocked' })
     expect(h.engine.reports.at(-1)?.[1].summary).toContain('psa-report 解析失败')
   })
@@ -355,7 +390,7 @@ describe('T3 executor', () => {
     const h = harness(t, { state: 'ready', summary: 'done', question: 'but also a question' } as WorkerReport)
     const run = executor(h)
     run.start(t, t.assignments[0]!)
-    await run.idle()
+    await vi.waitFor(() => expect(h.engine.reports.some(item => item[1].state === 'blocked')).toBe(true))
     expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'blocked' })
     expect(h.engine.reports.at(-1)?.[1].summary).toContain('ready 报告不能带 question')
   })
@@ -384,36 +419,8 @@ describe('T3 executor', () => {
         return { thread, items, recentRuns: [], nextPosition: null, hasMore: false }
       },
     })
-    const bound: [string, { source: string; id: string }, boolean][] = []
-    const pull = { number: 120, state: 'open', html_url: 'https://github.com/Javey-Li/FretSense/pull/120',
-      user: { login: 'agent', type: 'User' }, body: null, created_at: AT, merged: false, merged_at: null, closed_at: null,
-      auto_merge: null, head: { sha: 'c0ffee', ref: 'agent/fix', repo: { full_name: 'Javey-Li/FretSense' } } }
-    const github = {
-      deployment: { repository: 'Javey-Li/FretSense', github: { cli: 'gh', login: 'agent', noreply: 'agent@users.noreply.github.com' } },
-      commands: { withSignal: () => ({ api: async (_schema: unknown, _path: string) => pull }) },
-      ready: Promise.resolve(), configured: () => true, config: () => undefined,
-      receive: () => ({}), atomic: <T>(work: () => T) => work(),
-      state: { get: () => undefined, set: () => {}, keys: () => [] },
-      threads: { get: () => undefined, subscribed: () => [], describe: () => {}, patch: vi.fn() },
-      tickets: {
-        get: (id: string) => h.repo.tickets.get(id),
-        open: () => h.repo.tickets.open(),
-        bindThread: (id: string, thread: { source: string; id: string }, own: boolean) => {
-          bound.push([id, thread, own])
-          const current = h.repo.tickets.get(id)!
-          const key = `${thread.source}:${thread.id}`
-          const follow = current.follows?.find(item => item.thread === key)
-          const follows = follow
-            ? current.follows!.map(item => item.thread === key ? { ...item, own: item.own || own, closed: undefined } : item)
-            : [...(current.follows ?? []), { thread: key, own }]
-          h.repo.tickets.save({ ...current, follows })
-        },
-        threadClosed: vi.fn(),
-      },
-      triggers: { get: (id: string) => h.repo.triggers.get(id), latest: () => undefined },
-      notify: vi.fn(), report: vi.fn(),
-    }
-    const run = new T3Executor({ ...h.host, github: () => github as unknown as SourceContext },
+    const { github, bound } = fakeGithubSource(h.repo, pr120)
+    const run = new T3Executor({ ...h.host, github },
       { project: '/repo', mcpUrl: 'http://t3/mcp', mcpToken: 'token', fetchImpl: mcp.fetchImpl,
         ledgerPath: join(h.dir, 'ledger.json'), verifyIdentity: false, mcpRetryMs: 0, timeouts: { followPoll: 10 } })
     run.start(t, t.assignments[0]!)
@@ -471,6 +478,87 @@ describe('T3 executor', () => {
     await run.idle()
     expect(h.engine.reports.map(item => item[1].state)).toEqual(['waiting', 'ready'])
     expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'ready', summary: 'approved and done' })
+  })
+
+  it('keeps following after the executor blocks on an unparseable report and relays the next run ready', async () => {
+    const t = ticket()
+    const h = harness(t)
+    const ready = { schema_version: 1, report_id: 'r-ready', ticket_id: 't1', assignment_id: 'a1', state: 'ready',
+      summary: '改好了，PR：https://github.com/Javey-Li/FretSense/pull/120' }
+    let latest: string | null = 'run-1'
+    const mcp = fakeMcp({
+      t3_project_list: () => ({ projects: [{ id: 'p1', title: 'repo', workspaceRoot: '/repo' }], nextCursor: null }),
+      t3_thread_launch: () => ({ threadId: 'thread-1', runId: 'run-1', status: 'running' }),
+      t3_thread_wait: args => ({ threadId: args.threadId, runId: args.runId, status: 'completed', timedOut: false }),
+      t3_thread_read: args => {
+        const thread = { threadId: args.threadId, status: 'idle', pendingRequestCount: 0, latestRunId: latest }
+        if (args.view === 'activity') return { thread, items: [], recentRuns: [], nextPosition: null, hasMore: false }
+        const items = latest === 'run-2'
+          ? [{ itemId: 'm2', type: 'assistant_message', runId: 'run-2',
+            text: 'work\n```psa-report\n' + JSON.stringify(ready) + '\n```', textTruncated: false, nextTextOffset: null }]
+          : [{ itemId: 'm1', type: 'assistant_message', runId: 'run-1', text: 'I forgot the report block.',
+            textTruncated: false, nextTextOffset: null }]
+        return { thread, items, recentRuns: [], nextPosition: null, hasMore: false }
+      },
+    })
+    const { github, bound } = fakeGithubSource(h.repo, pr120)
+    const run = new T3Executor({ ...h.host, github }, { project: '/repo', mcpUrl: 'http://t3/mcp', mcpToken: 'token',
+      fetchImpl: mcp.fetchImpl, ledgerPath: join(h.dir, 'ledger.json'), verifyIdentity: false, mcpRetryMs: 0,
+      timeouts: { followPoll: 10 } })
+    run.start(t, t.assignments[0]!)
+    await vi.waitFor(() => expect(h.engine.reports.some(item => item[1].state === 'blocked')).toBe(true))
+    // The worker re-reports properly in a new run of the same thread.
+    latest = 'run-2'
+    await run.idle()
+    expect(h.engine.reports.map(item => item[1].state)).toEqual(['blocked', 'ready'])
+    expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'ready', summary: ready.summary })
+    expect(bound).toEqual([['t1', { source: 'github', id: '120' }, true]])
+  })
+
+  it('ends the follow on a worker blocked verdict that asks a person', async () => {
+    const t = ticket()
+    const h = harness(t, { state: 'blocked', summary: 'need a key', question: 'which key?' } as WorkerReport)
+    const run = executor(h)
+    run.start(t, t.assignments[0]!)
+    await run.idle()
+    expect(h.engine.reports).toHaveLength(1)
+    expect(h.engine.reports[0]![1]).toMatchObject({ state: 'blocked', question: 'which key?' })
+  })
+
+  it('resumes following a blocked ticket after a restart and relays the re-reported run', async () => {
+    const t = ticket()
+    t.assignments[0] = { ...t.assignments[0]!, state: 'running',
+      report: { state: 'blocked', summary: 'psa-report 解析失败：缺少符合 schema_version 1 的 report 块。原始输出：…', at: AT } }
+    const h = harness(t)
+    writeFileSync(join(h.dir, 'ledger.json'), JSON.stringify({ version: 1, entries: {},
+      threads: { t1: { threadId: 'thread-1', project: '/repo' } } }))
+    const ready = { schema_version: 1, report_id: 'r-ready', ticket_id: 't1', assignment_id: 'a1', state: 'ready',
+      summary: '改好了，PR：https://github.com/Javey-Li/FretSense/pull/120' }
+    const mcp = fakeMcp({
+      t3_thread_wait: args => ({ threadId: args.threadId, runId: args.runId, status: 'completed', timedOut: false }),
+      t3_thread_read: args => ({ thread: { threadId: args.threadId, status: 'idle', pendingRequestCount: 0, latestRunId: 'run-3' },
+        items: [{ itemId: 'm3', type: 'assistant_message', runId: 'run-3',
+          text: 'work\n```psa-report\n' + JSON.stringify(ready) + '\n```', textTruncated: false, nextTextOffset: null }],
+        recentRuns: [], nextPosition: null, hasMore: false }),
+    })
+    const { github, bound } = fakeGithubSource(h.repo, pr120)
+    const run = new T3Executor({ ...h.host, github }, { project: '/repo', mcpUrl: 'http://t3/mcp', mcpToken: 'token',
+      fetchImpl: mcp.fetchImpl, ledgerPath: join(h.dir, 'ledger.json'), verifyIdentity: false, mcpRetryMs: 0 })
+    run.resume()
+    await run.idle()
+    expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'ready', summary: ready.summary })
+    expect(bound).toEqual([['t1', { source: 'github', id: '120' }, true]])
+  })
+
+  it('does not resume following a blocked ticket whose question still waits for a person', () => {
+    const t = ticket()
+    t.assignments[0] = { ...t.assignments[0]!, state: 'running',
+      report: { state: 'blocked', summary: 'psa-report 解析失败：缺少符合 schema_version 1 的 report 块。原始输出：…', at: AT } }
+    t.attention = { id: 'att1', question: 'which key?' }
+    const h = harness(t)
+    const run = executor(h)
+    run.resume()
+    expect(h.engine.reports).toEqual([])
   })
 
   it('clears a stale fabricated waiting question on resume so the ticket shows its true stage', () => {
