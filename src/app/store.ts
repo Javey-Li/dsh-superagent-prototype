@@ -261,24 +261,51 @@ export class Store implements Repositories {
       const row = this.db.prepare('SELECT value FROM baseline WHERE id=?').get(id)
       return row ? baselineFromStored(JSON.parse(String(row.value))) : undefined
     },
-    /** Inserts or updates a record, refusing a change of `whoSaid` on an existing id. */
-    save: (input: BaselineInput): BaselineRecord => {
+    /**
+     * Inserts or updates a record, refusing a change of `whoSaid` on an existing id. A record that declares
+     * `supersedes` marks the older record `superseded` in the same transaction.
+     */
+    save: (input: BaselineInput): BaselineRecord => this.atomic(() => {
       const record = baselineRecord(input)
       const existing = this.baseline.get(record.id)
       if (existing && existing.whoSaid !== record.whoSaid) {
         throw new Error(`Baseline record ${record.id} already has whoSaid ${existing.whoSaid}; whoSaid never changes in place. Create a new record the owner confirmed`)
       }
+      if (record.supersedes) {
+        if (record.whoSaid === 'ai-record') throw new Error('An ai-record cannot supersede another baseline record; the owner must confirm the replacement')
+        const older = this.baseline.get(record.supersedes)
+        if (!older) throw new Error(`Unknown baseline record ${record.supersedes} to supersede`)
+        if (older.id === record.id) throw new Error('A baseline record cannot supersede itself')
+        const successor = this.db.prepare(`SELECT id FROM baseline WHERE json_extract(value, '$.supersedes') = ?
+          AND status = 'superseded' AND id <> ? LIMIT 1`).get(older.id, record.id)
+        if (successor) throw new Error(`Baseline record ${older.id} is already superseded by ${String(successor.id)}`)
+        this.putBaseline(record)
+        if (older.status !== 'superseded') this.putBaseline({ ...older, status: 'superseded' })
+        return record
+      }
       this.putBaseline(record)
       return record
-    },
-    /** Newest first, filtered by any of project, whoSaid, type and status. */
+    }),
+    /** Newest first, filtered by any of project, whoSaid, type, status and normative. */
     list: (query: BaselineQuery = {}): BaselineRecord[] => {
       const where: string[] = []
       const parameters: SQLInputValue[] = []
-      if (query.projectId !== undefined) { where.push('project = ?'); parameters.push(query.projectId) }
+      if (query.projectId !== undefined) {
+        if (query.projectId === '*') {
+          where.push("project = '*'")
+        } else {
+          where.push("(project = ? OR project = '*')")
+          parameters.push(query.projectId)
+        }
+      }
       if (query.whoSaid !== undefined) { where.push('who_said = ?'); parameters.push(query.whoSaid) }
       if (query.type !== undefined) { where.push('type = ?'); parameters.push(query.type) }
       if (query.status !== undefined) { where.push('status = ?'); parameters.push(query.status) }
+      else if (!query.includeSuperseded) where.push("status <> 'superseded'")
+      if (query.normative !== undefined) {
+        where.push("json_extract(value, '$.normative') = ?")
+        parameters.push(query.normative ? 1 : 0)
+      }
       const limit = Math.max(1, Math.min(1000, Math.trunc(query.limit ?? 100)))
       const sql = `SELECT value FROM baseline${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY at DESC, rowid DESC LIMIT ?`
       return this.db.prepare(sql).all(...parameters, limit).map(row => baselineFromStored(JSON.parse(String(row.value))))
@@ -294,6 +321,23 @@ export class Store implements Repositories {
       this.putBaseline(promoted)
       return promoted
     },
+    /** Marks an older record `superseded` by a newer one, keeping both the forward and backward links. */
+    supersede: (id: string, withId: string): { superseded: BaselineRecord; replacement: BaselineRecord } => this.atomic(() => {
+      if (id === withId) throw new Error('A baseline record cannot supersede itself')
+      const older = this.baseline.get(id)
+      const replacement = this.baseline.get(withId)
+      if (!older) throw new Error(`Unknown baseline record ${id}`)
+      if (!replacement) throw new Error(`Unknown baseline record ${withId}`)
+      if (replacement.whoSaid === 'ai-record') throw new Error('An ai-record cannot supersede another baseline record; the owner must confirm the replacement')
+      const successor = this.db.prepare(`SELECT id FROM baseline WHERE json_extract(value, '$.supersedes') = ?
+        AND status = 'superseded' AND id <> ? LIMIT 1`).get(older.id, replacement.id)
+      if (successor) throw new Error(`Baseline record ${older.id} is already superseded by ${String(successor.id)}`)
+      const superseded: BaselineRecord = { ...older, status: 'superseded' }
+      const linked: BaselineRecord = { ...replacement, supersedes: older.id }
+      this.putBaseline(linked)
+      this.putBaseline(superseded)
+      return { superseded, replacement: linked }
+    }),
   }
   /** Writes one baseline record and its query columns, replacing the row with the same id. */
   private putBaseline(record: BaselineRecord): void {

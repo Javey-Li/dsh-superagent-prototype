@@ -336,11 +336,18 @@ baseline 是项目旁的记录库，不是域对象。
 | `type` | Intent、Decision、Failure、Guard、Reference、Pattern、Example、OpenQuestion、ProjectState |
 | `title` | 一句话标题 |
 | `claim` | 具体内容 |
-| `whoSaid` | 谁说的，只用下面三个值 |
-| `whoSaidLabel` | 中文标签 |
+| `whoSaid` | 谁说的，只用下面三个值；由 `authority` 推出 |
+| `whoSaidLabel` | 中文标签，只读出来，不落库 |
+| `author` | 字是谁写的：`human`、`ai`、`mixed` |
+| `authority` | 算不算主人的决定：`owner-original`、`owner-approved`、`none` |
+| `evidence` | 怎么知道的：`stated`、`observed`、`relayed`、`inferred` |
+| `verbatim` | 主人的逐字原话 |
+| `summary` | AI 的总结或转述，和原话分开存 |
+| `approvedFrom` | 主人贴回 AI 稿时的来源；显式表示“我认可这段” |
+| `parts` | 混合作者记录的分段，每段带自己的 `author`、`authority`、`verbatim` 或 `summary` |
 | `provenance` | 来源：原话链接、日期、文件、对话 id |
 | `confidence` | 置信度 |
-| `status` | active、promoted 等 |
+| `status` | `active`、`promoted`、`superseded` |
 | `scope` | 生效范围 |
 | `normative` | 能不能当规范用 |
 | `ttlDays` | 多少天后算旧 |
@@ -352,15 +359,30 @@ baseline 是项目旁的记录库，不是域对象。
 
 | 值 | 中文 | 什么时候用 |
 | --- | --- | --- |
-| `founder-original` | 主人的原话 | 有原话、有出处。尽量逐字 |
-| `founder-approved-ai` | 主人认可的 AI 建议 | AI 先写，主人明确说“可以”“就这么办”。要同时记 AI 稿和主人认可 |
+| `founder-original` | 你的原话 | 有原话、有出处；必须带 `verbatim`，或者显式标 `paraphrase` |
+| `founder-approved-ai` | 你认可的 AI 建议 | AI 先写，主人明确说“可以”“就这么办”，或者把 AI 稿贴回来并标 `approvedFrom`。要同时记 AI 稿和主人认可 |
 | `ai-record` | AI 的记录（不是主人的决定） | AI 自己推断、总结、转述 |
 
-从 GitHub 作者自动判断时：
+`whoSaid` 是读出来的视图，权威字段是 `authority`：
 
-- 主人账号 → `founder-original`。
-- 其他账号 → `ai-record`。
-- `founder-approved-ai` 只能由主人明确确认后写入，不能自动判断。
+- `authority=owner-original` → `founder-original`
+- `authority=owner-approved` → `founder-approved-ai`
+- `authority=none` → `ai-record`
+
+从 GitHub 作者自动判断时，只设置 `author`：
+
+- 主人账号 → `author=human`，`authority` 仍是 `none`。
+- 其他账号 → `author=ai`，`authority=none`。
+- 主人可能原样贴回 AI 稿，所以账号本身不能直接给 `owner-original`。要标 `approvedFrom`，或显式传 `authority=owner-original` 且带 `verbatim`。
+- `founder-approved-ai` 只能由主人明确确认后写入，不能靠账号自动判断。
+
+混合作者用 `parts[]`，每段各算各的；整条记录取最高一级：有 `owner-original` 段就是 `founder-original`，否则有 `owner-approved` 段就是 `founder-approved-ai`，全是 AI 段就是 `ai-record`。
+
+`normative` 的规则：
+
+- 只有 Intent、Decision、Guard、Pattern 可以规范。
+- `whoSaid=ai-record` 永远不算规范，即使类型是 Decision，即使调用方传了 `normative=true`。
+- `Example` 永远不算规范。
 
 ### 晋升规则
 
@@ -372,14 +394,20 @@ baseline 是项目旁的记录库，不是域对象。
 6. `Example` 和非规范记录不能直接晋升。要晋升，先新建 Decision。
 7. 规范类型只有：Intent、Decision、Guard、Pattern。
 8. 没有出处的记录，不能标 `founder-original`。
+9. `ai-record` 不能自动算规范记录；查询规范记录时默认把它排除。
 
 ### 新旧和冲突
 
 - 默认 90 天算旧。Failure 可以 365 天。
 - 旧的规范记录不拿来当依据，先核对。
+- 新记录声明 `supersedes=旧 id` 时，旧记录统一标 `status=superseded`，新记录保留 `supersedes` 指回旧记录。
+- 默认查询不返回 `superseded`；要看历史，显式传 `includeSuperseded`。
+- `superseded` 记录不能晋升，也不能再被另一条记录取代。
+- `ai-record` 不能取代旧记录；取代必须由主人确认。
 - 同一范围出现两条冲突记录，不覆盖，开一条 `OpenQuestion`，进总看板的“要我定的”。
 - 主人现在的原话，优先级高于旧 baseline。
 - Policy 和 Mandate 管“能不能做”。baseline 管“以前怎么想、怎么说”。两者不能互相替代。
+- 全局决定用 `projectId="*"` 存；按项目查询时先读本项目，再读全局。
 
 ## 7. 明确不要的东西
 
