@@ -16,6 +16,7 @@
     "./client": "./lib/client.js",
     "./github-watch": "./lib/github-watch.js",
     "./feishu-watch": "./lib/feishu-watch.js",
+    "./schedule-watch": "./lib/schedule-watch.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
@@ -26,7 +27,8 @@
     "README.md",
     "prompts",
     "skills",
-    "integrations"
+    "integrations",
+    "scripts/fretsense-user-sim.mjs"
   ],
   "dsh": {
     "bundle": {

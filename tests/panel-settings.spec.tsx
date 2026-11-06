@@ -55,7 +55,11 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   await click(zh.save)
   expect(server.settings.executor).toEqual({ backend: 'dsh', maxWorkers: 5, directory: '/srv/work',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
-      model: 'worker-model', reasoningEffort: 'high' }, t3: { bin: '', mcpUrl: '', project: '', provider: 'magpie-codex',
+      model: 'worker-model', reasoningEffort: 'high' },
+      profiles: { router: { preset: 'dsh-superagent-router', model: null, ghPolicy: 'none' },
+        builder: { preset: 'dsh-superagent-worker', model: null, ghPolicy: 'none' },
+        observer: { preset: 'dsh-superagent-observer', model: null, ghPolicy: 'issues' } },
+      t3: { bin: '', mcpUrl: '', project: '', provider: 'magpie-codex',
       model: 'auto/dfmodel', ghConfigDir: '' } })
   expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/eval',
     'settings/executor'])

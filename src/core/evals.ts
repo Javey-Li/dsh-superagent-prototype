@@ -305,9 +305,15 @@ export class Evals extends EnginePart {
   /** Record an accept with the Mandate the Eval gives, and have Tickets create its ticket. */
   private accept(thread: Thread, evaluation: Evaluation, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Decision {
     const at = this.now()
+    const primary = this.repo.triggers.get(evaluation.primary ?? evaluation.triggerIds.at(-1)!)
+    const role = primary ? this.policy().role?.(primary) : undefined
+    if (role && !outcome.rules?.includes(role.policyRule)) {
+      throw new UserError('roleRuleMissing', { role: role.id, rule: role.policyRule })
+    }
     const basis = { ...evaluation.basis, ...(outcome.rules ? { rules: outcome.rules } : {}) }
     const { strength, policyVersion, actor } = evaluation
-    const mandate: Mandate = { strength, policyVersion, basis, actor, scope: outcome.scope, line: outcome.line ?? 'read' }
+    const mandate: Mandate = { strength, policyVersion, basis, actor, scope: outcome.scope, line: outcome.line ?? 'read',
+      ...(role ? { role: role.id, executorProfile: role.executorProfile, limits: role.limits } : {}) }
     const ticketId = key('ticket', evaluation.id)
     const audit = outcome.audit ? { audit: outcome.audit } : {}
     const decision = this.finish(thread, evaluation, { kind: 'accept', reason: reasonOf(outcome.reason), ...audit, mandate, ticketId })

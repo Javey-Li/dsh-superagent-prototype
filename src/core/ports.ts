@@ -1,6 +1,6 @@
 /** Ports the core depends on. Sources, policies, assessors, executors, and channels are project-specific. */
-import type { Assignment, ChannelRef, Decision, DecisionKind, Mandate, MandateBasis, Strength, Thread, Ticket, TicketEndBy, TicketOutcome, Trigger }
-  from './model.ts'
+import type { Assignment, ChannelRef, Decision, DecisionKind, ExecutorProfile, Mandate, MandateBasis, RoleLimits, Strength, Thread, Ticket,
+  TicketEndBy, TicketOutcome, Trigger } from './model.ts'
 import type { WorkLine } from './model.ts'
 import type { Reason } from './reasons.ts'
 
@@ -15,10 +15,19 @@ export interface SourceScope {
 }
 
 /** Versioned rules; `gate` decides who may originate work. Source scope is not part of Policy. */
+export interface RoleGrant {
+  id: string
+  policyRule: string
+  executorProfile: ExecutorProfile
+  limits: RoleLimits
+}
+
 export interface Policy {
   version: string
   paused: boolean
   gate(trigger: Trigger, thread: Thread, tickets: Ticket[]): GateResult
+  /** The configured scheduled role this Trigger carries, if its Source and policy rule still authorize it. */
+  role?(trigger: Trigger): RoleGrant | undefined
   /** Re-check a mandate's gate-layer basis under this policy, such as before an ended ticket resumes. */
   revalidate(mandate: Mandate): boolean
   /** Whether an inferred candidate may be accepted on the rules its assessment matched: assessments accept, and each rule is enabled. */

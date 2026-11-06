@@ -30,6 +30,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 - [009 Pilot guard](docs/009-pilot-guard.md): the checks and accepted risks before a real pilot
+- [010 Scheduled role agents](docs/010-role-agents.md): Mandate-first role runs, the observer executor, and the FretSense nightly user simulation
 
 This fork adds three deployment contracts. They build on the numbered documents:
 

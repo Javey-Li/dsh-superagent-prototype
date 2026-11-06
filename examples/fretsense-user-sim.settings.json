@@ -1,0 +1,107 @@
+{
+  "paused": false,
+  "sources": {
+    "github": {
+      "enabled": true,
+      "config": {
+        "repository": "Javey-Li/FretSense",
+        "cli": "gh",
+        "configDir": "/Users/javeyli/.config/gh-agent"
+      }
+    },
+    "schedule": {
+      "enabled": true,
+      "config": {
+        "cron": "30 2 * * *",
+        "timezone": "Asia/Tokyo",
+        "checkSeconds": 30,
+        "catchUpHours": 6,
+        "role": {
+          "id": "fretsense-user-sim",
+          "project": "FretSense",
+          "policyRule": "fretsense-user-sim",
+          "executorProfile": "observer",
+          "output": "role-report/v1",
+          "instructions": "Run fretsense_user_sim_run once. Read the returned seven path facts and the screenshots that support a finding. A finding must be visible or reproducibly reported by the fixed runner; no new finding means orchestrator_report with state=dropped and no Issue. Publish at most one Issue with fretsense_user_sim_publish and at most three findings. Never claim a real microphone, guitar, or recognition-accuracy test. Never edit the checkout, create a branch or PR, merge, close, comment, apply labels, or open more than one Issue. Stop at the first of: no new finding, three findings, one Issue, or the 20 minute run budget.",
+          "target": "http://127.0.0.1:4173",
+          "checkout": "/Users/javeyli/Projects/_role-worktrees/FretSense-user-sim",
+          "artifactRoot": "/Users/javeyli/.dsh/state/superagent-fretsense-user-sim/role-runs",
+          "github": {
+            "repository": "Javey-Li/FretSense",
+            "cli": "gh",
+            "configDir": "/Users/javeyli/.config/gh-agent",
+            "login": "javey-agent"
+          },
+          "limits": {
+            "durationMinutes": 20,
+            "maxIssues": 1,
+            "maxFindings": 3
+          }
+        }
+      }
+    }
+  },
+  "policy": {
+    "rules": [
+      {
+        "id": "fretsense-user-sim",
+        "name": "FretSense nightly user simulation",
+        "enabled": true,
+        "instruction": "Accept only the trusted schedule Trigger whose role is fretsense-user-sim and project is FretSense. Treat it as read-only observation work, not as permission to modify code. The observer runs the fixed seven desktop paths, records whoSaid=ai-record, opens at most one Issue as javey-agent, and stops at 20 minutes, one Issue, three findings, or no new finding."
+      }
+    ],
+    "sources": {
+      "github": {
+        "allowed": [],
+        "admission": {}
+      }
+    }
+  },
+  "eval": {
+    "mode": "auto",
+    "timeoutSeconds": 120,
+    "model": null
+  },
+  "executor": {
+    "backend": "dsh",
+    "model": null,
+    "maxWorkers": 1,
+    "directory": "",
+    "prepare": "",
+    "blockedCommands": [
+      "npm",
+      "pnpm",
+      "npx",
+      "open",
+      "osascript"
+    ],
+    "profiles": {
+      "router": {
+        "preset": "dsh-superagent-router",
+        "model": null,
+        "ghPolicy": "none"
+      },
+      "builder": {
+        "preset": "dsh-superagent-worker",
+        "model": null,
+        "ghPolicy": "none"
+      },
+      "observer": {
+        "preset": "dsh-superagent-observer",
+        "model": {
+          "provider": "magpie",
+          "model": "workbuddy/deepseek-v4.1-flash"
+        },
+        "ghPolicy": "issues"
+      }
+    },
+    "t3": {
+      "bin": "",
+      "mcpUrl": "",
+      "project": "",
+      "provider": "magpie-codex",
+      "model": "auto/dfmodel",
+      "ghConfigDir": ""
+    }
+  }
+}

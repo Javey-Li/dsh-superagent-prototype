@@ -1,0 +1,29 @@
+# Independent read-only role instance for the FretSense nightly observer.
+# Copy to $DSH_HOME/profiles/superagent-fretsense-user-sim/cordis.patch.yml, then import
+# examples/fretsense-user-sim.settings.json through this instance's management API.
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: 3083
+- id: agent-default-model
+  config:
+    provider: magpie
+    model: workbuddy/deepseek-v4.1-flash
+- id: llm-pi-ai
+  config:
+    providers:
+      magpie:
+        displayName: "Magpie (local)"
+        apiKeyEnv: MAGPIE_API_KEY
+        api: openai-completions
+        baseURL: http://127.0.0.1:3425/v1
+        models:
+          - id: workbuddy/deepseek-v4.1-flash
+            name: "DeepSeek V4.1 Flash"
+            contextWindow: 1000000
+            maxTokens: 128000
+- id: dsh-superagent
+  config:
+    stateDir: /Users/javeyli/.dsh/state/superagent-fretsense-user-sim
+- id: dsh-superagent-schedule
+  disabled: false

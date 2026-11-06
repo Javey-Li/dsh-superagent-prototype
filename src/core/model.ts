@@ -96,6 +96,14 @@ export const settled = (decision: Pick<Decision, 'kind' | 'reason'>): boolean =>
 export type Strength = 'explicit' | 'inferred'
 /** Which executor line carries an accepted Ticket: write work goes to T3, read work to a DSH worker. */
 export type WorkLine = 'read' | 'write'
+/** Physical executor tier selected by a role's Mandate; the profile is not itself an authorization. */
+export type ExecutorProfile = 'router' | 'builder' | 'observer'
+/** Stop limits fixed into a scheduled role's Mandate at acceptance. */
+export interface RoleLimits {
+  durationMinutes: number
+  maxIssues: number
+  maxFindings: number
+}
 /** The cells of a receiving scope's row in the admission table, by whether the sender is listed and addresses the agent. */
 export type AdmissionCell = 'listedUnaddressed' | 'unlistedAddressed' | 'unlistedUnaddressed'
 /**
@@ -134,6 +142,12 @@ export interface Mandate {
   scope: string
   /** Which executor line carries the work; absent on legacy Mandates, which read as `read`. */
   line?: WorkLine
+  /** The scheduled role this Ticket was accepted for, when any. */
+  role?: string
+  /** The executor tier fixed at acceptance; absent on legacy Mandates. */
+  executorProfile?: ExecutorProfile
+  /** Role stop limits fixed at acceptance. */
+  limits?: RoleLimits
 }
 
 /** The executor line of a Mandate; missing values from older stores read as the safe default, `read`. */
@@ -225,6 +239,8 @@ export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed
 export interface Assignment {
   id: string
   state: AssignmentState
+  /** Executor tier selected for this Assignment; a snapshot of the Ticket Mandate. */
+  executorProfile?: ExecutorProfile
   createdAt: string
   startedAt?: string
   endedAt?: string
