@@ -55,17 +55,22 @@ export class Tickets extends EnginePart {
     this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
   }
   /**
-   * Subscribes an open ticket to `thread` and records it in `ticket.follows` (`own` when opened by the ticket).
-   * @throws UserError when the ticket is unknown or has ended.
+   * Subscribes a ticket to `thread` and records it in `ticket.follows` (`own` when opened by the ticket). A `closed` fact
+   * lets a Source record a Thread that already ended on a Ticket that has ended too, without reopening it.
+   * @throws UserError when the ticket is unknown or has ended without a `closed` fact.
    */
-  bind(ticketId: string, thread: ThreadRef, own: boolean): Ticket {
-    if (!liveTicket(this.require(ticketId))) throw new UserError('ticketEnded')
+  bind(ticketId: string, thread: ThreadRef, own: boolean, closed?: Follow['closed']): Ticket {
+    if (!liveTicket(this.require(ticketId)) && !closed) throw new UserError('ticketEnded')
     this.subscribe(ticketId, thread)
     const ticket = this.require(ticketId)
     const followed = threadKey(thread)
     const follow = ticket.follows?.find(item => item.thread === followed)
-    // Re-binding a thread reopens it if previously closed; `own` remains true once set.
-    if (follow) { follow.own ||= own; delete follow.closed } else ticket.follows = [...ticket.follows ?? [], { thread: followed, own }]
+    // Re-binding an open thread reopens it if previously closed; a closed fact records its end; `own` remains true once set.
+    if (follow) {
+      follow.own ||= own
+      if (closed) follow.closed = closed
+      else delete follow.closed
+    } else ticket.follows = [...ticket.follows ?? [], { thread: followed, own, ...closed ? { closed } : {} }]
     ticket.updatedAt = this.now()
     this.repo.tickets.save(ticket)
     return ticket

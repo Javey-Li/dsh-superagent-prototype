@@ -1,6 +1,6 @@
 /** Pull request binding, lifecycle observation, and terminal IM notification helpers. */
 import { z } from 'zod'
-import { key, liveTicket, type Follow, type OutboundMessage, type ThreadFact, type Ticket } from '../core/index.ts'
+import { isoTime, key, liveTicket, type Follow, type OutboundMessage, type ThreadFact, type Ticket } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import { sameName } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
@@ -29,12 +29,17 @@ export const ticketBranch = (ticket: Pick<Ticket, 'execution'>, ref: string): bo
 const AUTO_MERGE_ON: ThreadFact = { label: { zh: '自动合并', en: 'Auto-merge' }, value: { zh: '已开启', en: 'on' } }
 
 /**
- * Validates and binds an open PR to a ticket when the PR is either the ticket's origin PR or an agent-authored PR on the ticket's branch, enforcing that one PR binds to at most one open ticket.
- * Returns an error message when binding is rejected, or undefined when the PR is bound or when the PR is not open (which is not an error).
+ * Validates and binds a PR to a ticket when the PR is either the ticket's origin PR or an agent-authored PR on the ticket's
+ * branch, enforcing that one PR binds to at most one open ticket. A merged PR is recorded as a closed follow even when the
+ * ticket has already ended, without reopening it.
+ * Returns an error message when binding is rejected, or undefined when the PR is bound or when an open ticket's unmerged PR
+ * is closed (which is not an error).
  */
 export function claimPull(ctx: SourceContext, ticketId: string, pr: Pull): string | undefined {
   const ticket = ctx.tickets.get(ticketId)
-  if (!ticket || !liveTicket(ticket)) return 'Ticket ended because its PR was closed'
+  if (!ticket) return 'Ticket ended because its PR was closed'
+  const closed = pr.merged ? { at: isoTime(pr.merged_at ?? pr.closed_at ?? new Date().toISOString()), outcome: 'merged' as const } : undefined
+  if (!liveTicket(ticket) && !closed) return 'Ticket ended because its PR was closed'
   const source = ctx.triggers.get(ticket.origin.triggerId)
   const started = source?.source === SOURCE && source.meta.isPr === true && source.meta.number === pr.number
   const opened = agentPull(pr, ctx.deployment) && ticketBranch(ticket, pr.head.ref)
@@ -44,8 +49,14 @@ export function claimPull(ctx: SourceContext, ticketId: string, pr: Pull): strin
   }
   const owner = ctx.tickets.open().find(item => pullsOf(item, true).includes(pr.number))
   if (owner && owner.id !== ticketId) return 'PR already belongs to another active ticket'
-  const follow = ticket.follows?.find(item => item.thread === `${SOURCE}:${pr.number}`)
-  if (pr.state === 'open' && (!follow || follow.closed || (opened && !follow.own))) bind(ctx, ticketId, pr, opened)
+  const thread = `${SOURCE}:${pr.number}`
+  const follow = ticket.follows?.find(item => item.thread === thread)
+  if (closed) {
+    const recorded = follow?.closed?.outcome === closed.outcome && follow.closed.at === closed.at && (!opened || follow.own)
+    if (!recorded) bind(ctx, ticketId, pr, opened, closed)
+  } else if (pr.state === 'open' && (!follow || follow.closed || (opened && !follow.own))) {
+    bind(ctx, ticketId, pr, opened)
+  }
   return undefined
 }
 /**
@@ -67,9 +78,9 @@ export async function observePull(ctx: SourceContext, pr: Pull): Promise<boolean
   ctx.threads.describe(`github:${pr.number}`, { facts: { autoMerge: !ended && pr.auto_merge != null ? AUTO_MERGE_ON : null } })
   return ended
 }
-function bind(ctx: SourceContext, ticketId: string, pr: Pull, own: boolean): void {
+function bind(ctx: SourceContext, ticketId: string, pr: Pull, own: boolean, closed?: Follow['closed']): void {
   ctx.atomic(() => {
-    ctx.tickets.bindThread(ticketId, { source: SOURCE, id: String(pr.number) }, own)
+    ctx.tickets.bindThread(ticketId, { source: SOURCE, id: String(pr.number) }, own, closed)
     ctx.threads.patch(`github:${pr.number}`, { number: pr.number, isPr: true, url: pr.html_url, prAuthor: pr.user.login })
   })
 }
