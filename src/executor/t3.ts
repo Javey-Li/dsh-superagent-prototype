@@ -38,6 +38,8 @@ const FOLLOW_POLL_MS = 5_000
 const PREPARE_TIMEOUT_MS = 180_000
 const TERMINAL_STATUS = new Set(['completed', 'failed', 'interrupted', 'cancelled', 'rolled_back'])
 const RUNNING_STATUS = new Set(['preparing', 'queued', 'starting', 'running'])
+/** A failed Ticket with no new input for this long is past (已过去) and gets archived. */
+const EXPIRED_FAILURE_MS = 24 * 60 * 60_000
 /**
  * The question an older build put on a Ticket when a T3 thread was waiting for an external event. Current builds never ask
  * it, so any occurrence on an open Ticket is stale and superseded by the executor's later reports.
@@ -441,6 +443,7 @@ export class T3Executor implements ExecutorRuntime {
   private readonly claimedRuns = new Map<string, Set<string>>()
   private readonly slotWaiters: { assignmentId: string; wake: () => void }[] = []
   private readonly idleWaiters: (() => void)[] = []
+  private expiryTimer?: ReturnType<typeof setInterval>
   private readonly projectIds = new Map<string, string>()
   private readonly projectCache = new Map<string, string>()
   /** `assignmentId:report_id` keys already applied, so a repeated report is handled once. */
@@ -472,8 +475,12 @@ export class T3Executor implements ExecutorRuntime {
     return { ...ticket, execution: ticketExecution(ticket, outcome, this.settings(), this.host.machine.stateDir) }
   }
 
-  /** T3 threads report through polling, so no host event subscription is needed. */
-  install(): void {}
+  /** The archive rule is time-based: check hourly so a long-running instance archives expired failures without a restart. */
+  install(): void {
+    if (this.expiryTimer) return
+    this.expiryTimer = setInterval(() => { this.archiveExpiredFailures() }, 60 * 60_000)
+    this.expiryTimer.unref?.()
+  }
 
   /** Queue an accepted or resumed Assignment for launch. */
   start(ticket: Ticket, assignment: Assignment): void {
@@ -503,6 +510,7 @@ export class T3Executor implements ExecutorRuntime {
 
   /** Reconcile open tickets after a host restart. */
   resume(): void {
+    this.archiveExpiredFailures()
     for (const ticket of this.host.store.tickets.open().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
       this.clearStaleAttention(ticket)
       const running = runningAssignment(ticket)
@@ -543,6 +551,36 @@ export class T3Executor implements ExecutorRuntime {
     }
   }
 
+  /**
+   * Archives the failed pilot/test Tickets whose failure drew nothing new for 24 hours: such a failure is past (已过去),
+   * and the Ticket only keeps the todo list noisy. Each ends as `dropped`; its report history and PR links stay visible.
+   */
+  private archiveExpiredFailures(nowMs = Date.now()): void {
+    if (this.stopping || this.disposed) return
+    for (const ticket of this.host.store.tickets.open()) this.archiveExpiredTicket(ticket, nowMs)
+  }
+
+  /** Whether a failed Ticket is expired, and the archiving of it: see {@link archiveExpiredFailures}. */
+  private archiveExpiredTicket(ticket: Ticket, nowMs: number): boolean {
+    // A question, an active worker, or a failed delivery still needs a person or the system; nothing new since the failure
+    // and an old failure mean the failure is over.
+    if (ticket.attention || ticket.delivery || runningAssignment(ticket)) return false
+    const latest = latestAssignment(ticket)
+    const report = latest?.report
+    if (!report || report.state !== 'failed' || latest?.state === 'ended') return false
+    if (Date.parse(report.at) > nowMs - EXPIRED_FAILURE_MS) return false
+    if (ticket.inputs.some(input => Date.parse(input.at) > Date.parse(report.at))) return false
+    try {
+      this.host.engine.report(ticket.id, { state: 'dropped',
+        summary: `失败报告已超过 24 小时没有新输入，自动归档为已过去。原报告：${report.summary.slice(0, 800)}` })
+      this.health('ready', `Archived the expired failed Ticket ${ticket.id}`)
+      return true
+    } catch (error) {
+      this.warn(`Archiving the expired failed Ticket ${ticket.id} failed: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }
+
   async shutdown(): Promise<void> {
     this.stopping = true
     for (const runs of this.running.values()) for (const run of runs) run.abort.abort()
@@ -558,6 +596,7 @@ export class T3Executor implements ExecutorRuntime {
   dispose(): void {
     this.stopping = true
     this.disposed = true
+    if (this.expiryTimer) { clearInterval(this.expiryTimer); this.expiryTimer = undefined }
     for (const runs of this.running.values()) for (const run of runs) run.abort.abort()
     this.running.clear(); this.launchQueue.length = 0; this.deliveryQueue.clear(); this.queued.clear()
     for (const waiter of this.slotWaiters.splice(0)) waiter.wake()

@@ -483,6 +483,53 @@ describe('T3 executor', () => {
     run.resume()
     expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'failed', question: null })
   })
+
+  it('archives a failed ticket with no new input for 24 hours as dropped', () => {
+    const t = ticket()
+    t.assignments[0] = { ...t.assignments[0]!, state: 'pending',
+      report: { state: 'failed', summary: 'T3_MCP_UNAVAILABLE: T3 MCP is unreachable',
+        at: new Date(Date.now() - 25 * 3_600_000).toISOString() } }
+    const h = harness(t)
+    const run = executor(h)
+    run.resume()
+    expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'dropped' })
+    expect(h.engine.reports.at(-1)?.[1].summary).toContain('已过去')
+  })
+
+  it('leaves failures alone when fresh, attended, running, answered by new input, or not failed', () => {
+    const failed = { state: 'failed' as const, summary: 'T3_MCP_UNAVAILABLE: unreachable', at: '' }
+    const stale = new Date(Date.now() - 25 * 3_600_000).toISOString()
+    const fresh = new Date(Date.now() - 3_600_000).toISOString()
+    const base = ticket()
+    base.assignments[0] = { ...base.assignments[0]!, state: 'pending', report: { ...failed, at: fresh } }
+    const h = harness(base)
+    const save = (t: Ticket) => h.repo.tickets.save(t)
+    const freshFailure = ticket()
+    freshFailure.id = 't-fresh'; freshFailure.assignments[0] = { ...freshFailure.assignments[0]!, state: 'pending',
+      report: { ...failed, at: fresh } }
+    save(freshFailure)
+    const attended = ticket()
+    attended.id = 't-attended'; attended.assignments[0] = { ...attended.assignments[0]!, state: 'pending',
+      report: { ...failed, at: stale } }
+    attended.attention = { id: 'att1', question: 'which key?' }
+    save(attended)
+    const running = ticket()
+    running.id = 't-running'; running.assignments[0] = { ...running.assignments[0]!, state: 'running',
+      report: { ...failed, at: stale } }
+    save(running)
+    const answered = ticket()
+    answered.id = 't-answered'; answered.assignments[0] = { ...answered.assignments[0]!, state: 'pending',
+      report: { ...failed, at: stale } }
+    answered.inputs.push({ id: 'i1', kind: 'trigger', triggerId: 'tr2', at: fresh })
+    save(answered)
+    const blocked = ticket()
+    blocked.id = 't-blocked'; blocked.assignments[0] = { ...blocked.assignments[0]!, state: 'pending',
+      report: { state: 'blocked', summary: 'T3 run is still running after the limit', at: stale } }
+    save(blocked)
+    const run = executor(h)
+    run.resume()
+    expect(h.engine.reports).toEqual([])
+  })
 })
 
 describe('psa-report parser', () => {
