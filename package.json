@@ -25,7 +25,8 @@
     "locale/*.json",
     "README.md",
     "prompts",
-    "skills"
+    "skills",
+    "integrations"
   ],
   "dsh": {
     "bundle": {
@@ -46,6 +47,7 @@
   },
   "scripts": {
     "build": "tsdown",
+    "guard:install": "node integrations/codex-guard/install.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test && pnpm build",
