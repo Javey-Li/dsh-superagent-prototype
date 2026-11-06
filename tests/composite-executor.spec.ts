@@ -99,7 +99,7 @@ function t3Harness(tickets: Ticket[]) {
   const host = { engine: api, store: { tickets: repo.tickets, triggers: repo.triggers, settings: () => SettingsSchema.parse({}) },
     machine: { stateDir: dir }, lifetime: new AbortController().signal, health: undefined,
     deployment: () => ({ github: { cli: 'gh', login: 'agent', noreply: 'agent@users.noreply.github.com' }, stateDir: dir }),
-    sourceLink: async () => ({}), repliedTo: () => undefined, closing: () => false }
+    environment: () => [], sourceLink: async () => ({}), repliedTo: () => undefined, closing: () => false }
   const mcp = fakeMcp()
   const write = new T3Executor(host, { project: '/repo', mcpUrl: 'http://t3/mcp', mcpToken: 'token', fetchImpl: mcp.fetchImpl,
     ledgerPath: join(dir, 'ledger.json'), verifyIdentity: false, mcpRetryMs: 0, maxWorkers: WRITE_LIMIT })

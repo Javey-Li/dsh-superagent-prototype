@@ -3,12 +3,13 @@
   "defaults": {
     "host": "127.0.0.1",
     "env": {
-      "MAGPIE_API_KEY": "local"
+      "MAGPIE_API_KEY": "local",
+      "MAGPIE_GATEWAY_KEY": "local"
     },
     "model": {
       "provider": "magpie",
       "displayName": "Magpie (local)",
-      "apiKeyEnv": "MAGPIE_API_KEY",
+      "apiKeyEnv": "MAGPIE_GATEWAY_KEY",
       "api": "openai-completions",
       "baseURL": "http://127.0.0.1:3425/v1",
       "model": "workbuddy/deepseek-v4.1-flash",
@@ -47,7 +48,14 @@
         "executor": {
           "backend": "composite",
           "maxWorkers": 2,
-          "prepare": "git -C /Users/javeyli/Projects/FretSense fetch --no-tags \"https://github.com/$DSH_SUPERAGENT_GITHUB_REPOSITORY.git\" \"${DSH_SUPERAGENT_GITHUB_PR_HEAD:-HEAD}:refs/dsh-superagent/$DSH_SUPERAGENT_TICKET\" && git -C /Users/javeyli/Projects/FretSense worktree add -b \"agent/$DSH_SUPERAGENT_NAME\" \"$DSH_SUPERAGENT_DIR\" \"refs/dsh-superagent/$DSH_SUPERAGENT_TICKET\""
+          "prepare": "git -C /Users/javeyli/Projects/FretSense fetch --no-tags \"https://github.com/$DSH_SUPERAGENT_GITHUB_REPOSITORY.git\" \"${DSH_SUPERAGENT_GITHUB_PR_HEAD:-HEAD}:refs/dsh-superagent/$DSH_SUPERAGENT_TICKET\" && git -C /Users/javeyli/Projects/FretSense worktree add -b \"agent/$DSH_SUPERAGENT_NAME\" \"$DSH_SUPERAGENT_DIR\" \"refs/dsh-superagent/$DSH_SUPERAGENT_TICKET\"",
+          "t3": {
+            "mcpUrl": "http://127.0.0.1:3778/mcp",
+            "project": "/Users/javeyli/Projects/FretSense",
+            "provider": "magpie-codex",
+            "model": "auto/dfmodel",
+            "ghConfigDir": "/Users/javeyli/.config/gh-agent"
+          }
         }
       }
     }

@@ -131,7 +131,7 @@ export class Runtime extends Service implements SourceHost {
       // One worker health entry belongs to whichever backend Runtime selected at startup.
       const workerHealth = board.claim('worker')
       const t3 = (options: { maxWorkers?: number } = {}) => new T3Executor({ get engine() { return runtime.engine }, store, machine,
-        lifetime: this.lifetime, health: workerHealth, deployment: () => setup.deployment, sourceLink: link,
+        lifetime: this.lifetime, health: workerHealth, deployment: () => setup.deployment, environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger), closing: () => this.closing() }, options)
       const dsh = () => new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: workerHealth, machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
