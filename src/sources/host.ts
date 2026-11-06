@@ -1,5 +1,5 @@
 /** Host and context interfaces connecting Source plugins to the application; also imported by the web panel, so it must not import Node-only modules. */
-import type { ChannelRef, ReceiveResult, OutboundMessage, Thread, ThreadFact, ThreadRef, Ticket, Trigger } from '../core/index.ts'
+import type { ChannelRef, Follow, ReceiveResult, OutboundMessage, Thread, ThreadFact, ThreadRef, Ticket, Trigger } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { Deployment } from '../deployment.ts'
 import type { SourceRegistry } from './registry.ts'
@@ -54,8 +54,11 @@ export interface SourceContext {
     get(id: string): Ticket | undefined
     /** Open tickets, newest first. */
     open(): Ticket[]
-    /** Binds an open ticket to follow a Source Thread (`own` when opened by the ticket) so the Thread's close, not a ready report, ends the ticket. */
-    bindThread(id: string, thread: ThreadRef, own: boolean): void
+    /**
+     * Binds a ticket to follow a Source Thread (`own` when opened by the ticket) so the Thread's close, not a ready report,
+     * ends the ticket. A `closed` fact also binds an ended Thread to a Ticket that already ended, without reopening it.
+     */
+    bindThread(id: string, thread: ThreadRef, own: boolean, closed?: Follow['closed']): void
     /** Reports that a followed Thread closed at `at`; each open ticket following it ends once no `own` Thread remains open and no resumed work is still running. */
     threadClosed(thread: ThreadRef, outcome: 'merged' | 'closed', at: string): void
   }

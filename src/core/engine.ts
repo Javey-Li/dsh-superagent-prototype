@@ -1,7 +1,7 @@
 /** The domain Engine: the single entry point of the core, and the role interfaces its callers receive. */
 import { UserError } from './errors.ts'
 import { isoTime, liveTicket } from './model.ts'
-import type { ChannelRef, Decision, PolicyEffect, ThreadRef, Ticket, Trigger } from './model.ts'
+import type { ChannelRef, Decision, Follow, PolicyEffect, ThreadRef, Ticket, Trigger } from './model.ts'
 import type { Candidate, Repositories } from './ports.ts'
 import type { EngineOptions } from './part.ts'
 import { Assignments, type WorkerReport } from './assignments.ts'
@@ -47,12 +47,13 @@ export class Engine {
    */
   receive(trigger: Trigger): ReceiveResult { return this.repo.atomic(() => this.intake.receive(trigger)) }
   /**
-   * A Source's request to make an open ticket follow one of its Threads, such as a pull request's, `own` when the ticket
-   * opened it: the ticket subscribes to it, and a ready report ends it only once `followsDone` holds (see `Tickets.followsDone`).
-   * @throws UserError when the ticket is unknown or has ended.
+   * A Source's request to make a ticket follow one of its Threads, such as a pull request's, `own` when the ticket opened
+   * it: the ticket subscribes to it, and a ready report ends it only once `followsDone` holds (see `Tickets.followsDone`).
+   * A `closed` fact also records an ended Thread on a Ticket that already ended, without reopening it.
+   * @throws UserError when the ticket is unknown, or has ended and no `closed` fact is given.
    */
-  bindThread(ticketId: string, thread: ThreadRef, own: boolean): Ticket {
-    return this.repo.atomic(() => this.tickets.bind(ticketId, thread, own))
+  bindThread(ticketId: string, thread: ThreadRef, own: boolean, closed?: Follow['closed']): Ticket {
+    return this.repo.atomic(() => this.tickets.bind(ticketId, thread, own, closed))
   }
   /**
    * A Source's fact that a Thread closed, such as its pull request's merge, at the time it happened. An open ticket that

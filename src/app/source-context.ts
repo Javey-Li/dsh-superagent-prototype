@@ -59,7 +59,7 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     tickets: {
       get: id => store.tickets.get(id),
       open: () => store.tickets.open(),
-      bindThread: (id, thread, own) => { deps.engine.bindThread(id, thread, own) },
+      bindThread: (id, thread, own, closed) => { deps.engine.bindThread(id, thread, own, closed) },
       threadClosed: (thread, outcome, at) => { deps.engine.threadClosed(thread, outcome, at) },
     },
     triggers: { get: id => store.triggers.get(id), latest: thread => store.read.threadTriggers(thread, 1)[0] },

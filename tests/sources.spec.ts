@@ -968,6 +968,50 @@ describe('github source', () => {
     expect(claimPull(h, 't1', openPull(30))).toBe('Ticket ended because its PR was closed')
     h.store.close()
   })
+  it('binds an open agent PR once, and a repeated claim leaves the Ticket and its Thread unchanged', () => {
+    const h = host()
+    h.store.tickets.save({ ...openTicket('t1'), execution: execution('fix-1') })
+    expect(claimPull(h, 't1', agentsPull(51, 'agent/fix-1'))).toBeUndefined()
+    expect(h.store.tickets.get('t1')).toMatchObject({ follows: [{ thread: 'github:51', own: true }] })
+    expect(h.store.threads.get('github:51')).toMatchObject({ subscriptions: ['t1'],
+      meta: { url: 'https://github.com/acme/widgets/pull/51', isPr: true, prAuthor: 'agent-bot' } })
+    const ticket = h.store.tickets.get('t1')
+    const thread = h.store.threads.get('github:51')
+    expect(claimPull(h, 't1', agentsPull(51, 'agent/fix-1'))).toBeUndefined()
+    expect(h.store.tickets.get('t1')).toEqual(ticket)
+    expect(h.store.threads.get('github:51')).toEqual(thread)
+    h.store.close()
+  })
+  it('records a merged agent PR on an open Ticket, so its Thread and link are visible before the report ends it', () => {
+    const h = host()
+    h.store.tickets.save({ ...openTicket('t1'), execution: execution('fix-1') })
+    const merged: Pull = { ...agentsPull(52, 'agent/fix-1'), state: 'closed', merged: true, merged_at: '2026-09-02T00:00:00Z' }
+    expect(claimPull(h, 't1', merged)).toBeUndefined()
+    expect(h.store.tickets.get('t1')).toMatchObject({ follows: [{ thread: 'github:52', own: true,
+      closed: { at: '2026-09-02T00:00:00.000Z', outcome: 'merged' } }] })
+    expect(h.store.tickets.get('t1')).not.toHaveProperty('ended')
+    expect(h.store.threads.get('github:52')).toMatchObject({ subscriptions: ['t1'],
+      meta: { url: 'https://github.com/acme/widgets/pull/52', isPr: true, prAuthor: 'agent-bot' } })
+    h.store.close()
+  })
+  it('attaches a merged PR to an ended Ticket without reopening it, and repeated claims are idempotent', () => {
+    const h = host()
+    const ended = { at: '2026-09-01T00:00:00.000Z', by: 'executor' as const, outcome: 'completed' as const }
+    h.store.tickets.save({ ...openTicket('t1'), execution: execution('fix-1'), ended })
+    const merged: Pull = { ...agentsPull(53, 'agent/fix-1'), state: 'closed', merged: true, merged_at: '2026-09-02T00:00:00Z' }
+    expect(claimPull(h, 't1', merged)).toBeUndefined()
+    const ticket = h.store.tickets.get('t1')!
+    expect(ticket.ended).toEqual(ended)
+    expect(ticket.follows).toEqual([{ thread: 'github:53', own: true,
+      closed: { at: '2026-09-02T00:00:00.000Z', outcome: 'merged' } }])
+    expect(h.store.threads.get('github:53')).toMatchObject({ subscriptions: ['t1'],
+      meta: { url: 'https://github.com/acme/widgets/pull/53', isPr: true, prAuthor: 'agent-bot' } })
+    const thread = h.store.threads.get('github:53')
+    expect(claimPull(h, 't1', merged)).toBeUndefined()
+    expect(h.store.tickets.get('t1')).toEqual(ticket)
+    expect(h.store.threads.get('github:53')).toEqual(thread)
+    h.store.close()
+  })
 })
 
 describe('source context', () => {
