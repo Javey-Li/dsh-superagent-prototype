@@ -30,6 +30,12 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 
+This fork adds three deployment contracts. They build on the numbered documents:
+
+- [Architecture：一个项目一个实例](docs/ARCHITECTURE_架构.md)
+- [Domain contract：域契约](docs/DOMAIN_CONTRACT_域契约.md)
+- [Board contract：面板契约](docs/BOARD_CONTRACT_面板契约.md)
+
 ## Development
 
 `pnpm check` runs the typecheck, the tests and the build.
