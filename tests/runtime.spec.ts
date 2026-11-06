@@ -144,6 +144,7 @@ beforeEach(async () => {
   answers = {
     [`git -C ${directory} rev-parse --show-toplevel`]: `${directory}\n`,
     [`git -C ${directory} remote get-url --push origin`]: 'https://github.com/acme/widgets.git\n',
+    [`${join(directory, 'worker-bin', 'gh')} api user --jq .login`]: 'agent-bot\n',
     [`${AGENT()} api user`]: '{"login":"agent-bot","id":7}', [`${AGENT()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`]: '{"name":"acme/widgets","push":true}\n',
     [`${OTHER()} api user`]: '{"login":"agent-bot","id":7}', [`${OTHER()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`]: '{"name":"acme/widgets","push":true}\n',
     [`${BOT()} auth status`]: JSON.stringify({ appId: 'cli_bot', brand: 'feishu', identities: { bot: { status: 'ready' } } }),
@@ -234,8 +235,9 @@ it('relays an explicit member mention as a candidate and creates the ticket, ack
   expect(larkCalls.find(args => args[1] === '+messages-reply')).toEqual(expect.arrayContaining(['--message-id', 'om_1', '--markdown', '收到，修复回归。']))
   // The first message holds the request itself: an explicit ticket has no assignment text beyond it, and nothing to read first.
   const first = relays(sessionId)[0]!
-  expect(first).toEqual({ ticket_id: ticket.id, title: '修复回归', trigger: expect.objectContaining({ trigger_id: trigger.id, from: MEMBER,
+  expect(first).toMatchObject({ ticket_id: ticket.id, title: '修复回归', trigger: expect.objectContaining({ trigger_id: trigger.id, from: MEMBER,
     thread: `feishu:${CHAT}:om_1`, text: trigger.text }) })
+  expect(first.context).toContain(`Ticket ${ticket.id}`)
   expect(first.trigger).not.toHaveProperty('read')
   expect(await route({ kind: 'accept', trigger_id: trigger.id, title: 'again', worktree_name: worktreeName, acknowledgement: 'x' })).toMatchObject({ ticket: { ticket_id: ticket.id } })
 })
@@ -1749,7 +1751,9 @@ it('gives the Assignment a restart starts the messages the replaced one had deli
   // A follow-up reaches the worker mid-turn, and the process stops before a step took it: DSH disposes the worker's agent
   // with its inbox.
   await receive(feishu('2', '另外改一下按钮', { root_id: 'om_1' }))
-  const sent = () => deliveries.mock.calls.filter(([call]) => call.sessionId === sessionId && call.text.includes('另外改一下按钮')).length
+  // The restart's assignment carries the same text in its context page; count the input delivery itself, not that summary.
+  const sent = () => deliveries.mock.calls.filter(([call]) => call.sessionId === sessionId && call.text.includes('另外改一下按钮')
+    && !call.text.includes('"context"')).length
   expect(sent()).toBe(1)
   const inbox = (agents.get(sessionId)! as unknown as { inbox: { nextTurn: unknown[]; nextStep: unknown[] } }).inbox
   inbox.nextTurn.length = 0; inbox.nextStep.length = 0

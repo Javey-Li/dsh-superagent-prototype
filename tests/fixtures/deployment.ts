@@ -13,7 +13,7 @@ export const testMachine = (overrides: Partial<Machine> = {}): Machine => ({
 })
 export const testDeployment = (overrides: Partial<Deployment> = {}): Deployment => ({
   ...testMachine(), repository: 'acme/widgets',
-  github: { cli: '/bin/false', login: 'agent-bot', noreply: '7+agent-bot@users.noreply.github.com' },
+  github: { cli: '/bin/false', login: 'agent-bot', noreply: '7+agent-bot@users.noreply.github.com', configDir: '/tmp/dsh-superagent-test/gh-config' },
   feishu: { cli: '/bin/false', botId: 'ou_bot', appId: 'cli_bot', brand: 'feishu', name: 'Widgets Bot' },
   ...overrides,
 })

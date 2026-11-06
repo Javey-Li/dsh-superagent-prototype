@@ -53,9 +53,12 @@ export class Intake extends EnginePart {
     const fanout = [...reached.keys()], context = fanout.filter(id => reached.get(id)!.context)
     const disposition = { fanout, ...context.length ? { context } : {}, at }
     this.repo.triggers.saveDisposition(trigger.id, disposition)
-    // A person's message that no ticket decides, such as one that reached only tickets a person stopped or that follow the
-    // Thread for context, and every bot's, goes to Eval.
-    if (!this.owners(trigger).length) this.queueForEval(trigger)
+    // A message a live ticket receives on its own Thread goes straight to that ticket: reviews, CI results and a person's
+    // follow-up are the same work, and the main Session must not route them again. Only one that reached no live ticket,
+    // such as a message on a Thread a ticket follows for context only, or one that reached only ended or stopped tickets,
+    // becomes a candidate.
+    const delivered = fanout.some(id => !context.includes(id))
+    if (!this.owners(trigger).length && !delivered) this.queueForEval(trigger)
     for (const ticketId of fanout) this.tickets.wake(ticketId)
     this.emit('trigger.received', { triggerId: trigger.id, threads: trigger.threads.map(threadKey) })
     return 'stored'

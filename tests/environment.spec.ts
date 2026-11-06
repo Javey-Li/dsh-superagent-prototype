@@ -72,6 +72,10 @@ describe('worker shims', () => {
 })
 
 describe('agent git configuration', () => {
+  it('points gh at an isolated configuration directory, never the operator\'s', () => {
+    expect(agentVariables(dir).GH_CONFIG_DIR).toBe(join(dir, 'gh-config'))
+    expect(agentVariables(dir, join(dir, 'agent-gh')).GH_CONFIG_DIR).toBe(join(dir, 'agent-gh'))
+  })
   it('ignores the operator\'s global and system git configuration, also after DSH drops credential-shaped variables', async () => {
     const home = join(dir, 'home'); mkdirSync(home)
     // Operator configuration that rewrites HTTPS to SSH, enables commit signing, and sets a credential helper.

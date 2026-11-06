@@ -60,6 +60,12 @@ The environment section gives the main Session deployment-wide values and each E
 
 Executors also read DeepSeek Harness's coding prompt and the repository's `AGENTS.md`; the main Session does not. An inferred Ticket adds a final note limiting its Executor to the matched rules. Assignments and incoming messages arrive inline as Trigger cards, with resource pointers only for truncated content.
 
+An Assignment's first message also carries a one-page Ticket context: state and stage, the Mandate, the original request, the
+latest report, the Issue/pull-request/review/CI associations the Ticket follows, recent signals, and `read` pointers to the
+full text. The page is deterministic and bounded; older signals are dropped from it first and remain available through
+`ticket/<id>/inputs` or `trigger/<id>`. An agent answers a status question from this page and reads further only when needed,
+so a person can ask whether work is done the next day without the main Session reconstructing history.
+
 Executors work unattended. Their tools exclude those that ask a person, present UI to them or change the profile, such as `ask_user_question`, `present` and `plugin_manager`.
 
 From strongest to weakest:

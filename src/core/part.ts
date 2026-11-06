@@ -35,8 +35,8 @@ export abstract class EnginePart {
   }
   /**
    * Record that a ticket's worker hands back a Trigger that reached the ticket, with why, and queue it for Eval when the
-   * ticket decided it and no other ticket still does. One the ticket did not decide, such as a bot's, one a person sent to
-   * Eval or one on a Thread it follows for context, went to Eval without it.
+   * ticket decided it and no other ticket still does. One the ticket did not decide, such as one on a Thread it follows for
+   * context, or one a person sent to Eval, went to Eval without it.
    * @returns whether it was queued.
    */
   protected handBack(ticketId: string, trigger: Trigger, reason: string): boolean {

@@ -17,7 +17,7 @@ The Source records whether a message addresses the agent: `mention` for a mentio
 
 ### Subscriptions: continuing existing work
 
-Every message on a subscribed Thread reaches its subscribed Tickets as context, including messages from bots and CI. This delivery bypasses the gate and grants no new authority. Each Ticket remains limited by its Mandate.
+Every message on a subscribed Thread reaches its subscribed Tickets as context, including messages from bots and CI. This delivery bypasses the gate and grants no new authority; while a live Ticket receives it on the Ticket's own Thread, it also takes no Eval. Each Ticket remains limited by its Mandate.
 
 A person's message on a Ticket's own Thread belongs to that Ticket's Executor to decide. The same applies when the main Session attaches a message to a Ticket. While an Executor owns the message, it takes no Eval and gets no Decision. Each Executor either handles the request within its Ticket's scope or hands it back for routing elsewhere.
 

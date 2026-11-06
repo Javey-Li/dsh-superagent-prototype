@@ -42,9 +42,11 @@ export const GIT_LOCATION: readonly string[] = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT
  * Returns environment variable overrides that strip ambient GitHub tokens, interactive prompts, the repository the host's own
  * environment may name, and operator git identity/config overrides.
  */
-export function agentVariables(stateDir: string): Record<string, string | undefined> {
+export function agentVariables(stateDir: string, configDir = join(stateDir, 'gh-config')): Record<string, string | undefined> {
   return {
     GH_TOKEN: undefined, GITHUB_TOKEN: undefined,
+    // Point gh at an isolated configuration unless the agent CLI wrapper sets its own; never the operator's ~/.config/gh.
+    GH_CONFIG_DIR: configDir,
     // A worker's git finds the repository from its directory, never from the host's environment.
     ...Object.fromEntries(GIT_LOCATION.map(name => [name, undefined])),
     GIT_CONFIG_GLOBAL: workerGitConfig(stateDir), GIT_CONFIG_NOSYSTEM: '1',
@@ -134,12 +136,19 @@ export async function runAsWorker(subprocess: SubprocessRuntime, argv: string[],
   throw new CliError(read(handle.collected.stderr).trim() || `${argv.join(' ')} ${ended}`, undefined, exitCode ?? undefined)
 }
 
-/** Verifies that worker git invocations resolve the deployment's GitHub credential helper. */
+/** Verifies that worker git and gh invocations resolve the deployment's isolated configuration and agent identity. */
 export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'stateDir'>, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
   const { github, stateDir } = deployment
   // `-z` separates fields with NUL and never quotes paths.
   const helpers = (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', '--get-all', 'credential.https://github.com.helper'], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)])).catch(() => '')).split('\0')
   if (helpers.join('\0') !== [`file:${workerGitConfig(stateDir)}`, credentialHelper(github.cli), ''].join('\0')) throw new SetupError('gitTooOld')
+  // Run the shim the workers use, not the configured CLI directly: a wrapper may set GH_CONFIG_DIR itself, and this checks the
+  // identity a worker actually gets instead of the identity setup probed.
+  const login = await runAsWorker(subprocess, [join(workerBin(stateDir), 'gh'), 'api', 'user', '--jq', '.login'], stateDir,
+    AbortSignal.any([signal, AbortSignal.timeout(60_000)])).catch((error: unknown) => {
+    throw new SetupError('agentIdentityUnverified', { output: error instanceof Error ? error.message : String(error) })
+  })
+  if (login.trim() !== github.login) throw new SetupError('agentIdentityMismatch', { expected: github.login, actual: login.trim() })
 }
 
 /**

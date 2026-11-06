@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Engine, MemoryRepositories, UserError, followupOwners, key, runningAssignment, ticketOutcome, ticketStage,
   waitsForPerson } from '../src/core/index.ts'
 import type { Assessor, Assignment, Candidate, EngineOptions, Executor, OutboundMessage, Outcome, Policy, Ticket, Trigger } from '../src/core/index.ts'
+import { renderTicketContext, ticketContextPackage } from '../src/app/context-package.ts'
 
 const member = { source: 'chat', id: 'alice' }
 const guest = { source: 'chat', id: 'guest' }
@@ -199,9 +200,47 @@ describe('subscription fan-out', () => {
       1])
     h.tick(600); h.engine.evaluateDue()
     expect(h.repo.decisions.byThread('chat:t1')).toHaveLength(1)
-    // A bot's message there still goes to Eval, which the gate does not admit.
+    // A bot's CI result on the same thread is part of the same work: it reaches the ticket directly, with no Eval.
     h.engine.receive(trigger('3', { human: false })); h.pump()
-    expect(h.repo.decisions.byThread('chat:t1').at(-1)).toMatchObject({ kind: 'ignore', triggerIds: ['3'] })
+    expect(h.repo.tickets.get(ticket.id)!.inputs).toContainEqual(expect.objectContaining({ kind: 'trigger', triggerId: '3' }))
+    expect(h.repo.decisions.byThread('chat:t1')).toHaveLength(1)
+    expect(h.repo.threads.get('chat:t1')!.pending).toEqual([])
+  })
+  it('keeps a later requirement, a review, CI and a status question on the same ticket with one Decision', () => {
+    const h = harness()
+    h.engine.receive(trigger('1', { source: 'github', threads: [{ source: 'github', id: '42' }], url: 'https://github.com/acme/widgets/issues/42',
+      text: '增加 CSV 导出', meta: { number: 42, isPr: false, kind: 'issue' } }))
+    h.pump()
+    const decision = h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'CSV 导出', scope: 'CSV export', reason: 'requested',
+      acknowledgement: '开始加 CSV 导出。' })
+    h.settle()
+    const ticketId = decision.ticketId!
+    h.engine.bindThread(ticketId, { source: 'github', id: '42' }, true)
+    const pr = { number: 42, isPr: true, prAuthor: 'alice' }
+    // The developer's mid-work addition: scope is the same ticket, not a new candidate.
+    h.tick(1); h.engine.receive(trigger('2', { source: 'github', threads: [{ source: 'github', id: '42' }],
+      text: '保留当前筛选条件', meta: { ...pr, kind: 'pull' } })); h.pump()
+    // A review comment and a failing CI check are delivered by the same subscription.
+    h.tick(1); h.engine.receive(trigger('3', { source: 'github', threads: [{ source: 'github', id: '42' }], actor: guest,
+      text: 'review: export should keep the active filter', meta: { ...pr, kind: 'review', commentId: 7 } })); h.pump()
+    h.tick(1); h.engine.receive(trigger('4', { source: 'github', threads: [{ source: 'github', id: '42' }], human: false,
+      actor: { source: 'github', id: '' }, text: 'CI failed: unit tests', meta: { ...pr, ci: true, revision: 1 } })); h.pump()
+    const ticket = h.repo.tickets.get(ticketId)!
+    expect(ticket.inputs.flatMap(input => input.kind === 'trigger' ? [input.triggerId] : [])).toEqual(['2', '3', '4'])
+    expect(h.repo.decisions.byThread('github:42')).toHaveLength(1)
+    expect(h.repo.threads.get('github:42')!.pending).toEqual([])
+    h.engine.report(ticketId, { state: 'ready', summary: 'CSV 导出完成，筛选条件保留；等待合并。' })
+    // The next day's status question also goes to the same ticket, with no router decision.
+    h.tick(60 * 60 * 24); h.engine.receive(trigger('5', { source: 'github', threads: [{ source: 'github', id: '42' }],
+      text: '改好了吗？', meta: { ...pr, kind: 'pull' } })); h.pump()
+    expect(h.repo.decisions.byThread('github:42')).toHaveLength(1)
+    const summary = renderTicketContext(ticketContextPackage(h.repo, h.repo.tickets.get(ticketId)!))
+    expect(summary).toContain('pull 42')
+    expect(summary).toContain('review 42')
+    expect(summary).toContain('ci 42')
+    expect(summary).toContain('Last report (ready')
+    expect(summary).toContain('CSV 导出完成')
+    expect(summary).toContain('trigger/4')
   })
   it('keeps inputs undelivered until an assignment is running, and asks to launch one whose launch failed again', () => {
     const h = harness()

@@ -84,7 +84,9 @@ function harness(t: Ticket, report: WorkerReport | string = { state: 'ready', su
   repo.tickets.save(t); repo.triggers.save(trigger('tr1')); repo.triggers.save(trigger('tr2'))
   const started: [string, string][] = [], reports: [string, WorkerReport][] = [], delivered: [string, string, string[]][] = []
   const read: [string, string[]][] = [], turns: [string, string][] = []
-  const text = typeof report === 'string' ? report : `done\n\`\`\`psa-report\n${JSON.stringify(report)}\n\`\`\``
+  const bound = typeof report === 'string' ? report : { schema_version: 1, report_id: `r-${Date.now()}`, ticket_id: t.id,
+    assignment_id: t.assignments.at(-1)!.id, ...report }
+  const text = typeof bound === 'string' ? bound : `done\n\`\`\`psa-report\n${JSON.stringify(bound)}\n\`\`\``
   let latestRun = 'run-1'
   const fake = fakeMcp({
     t3_project_list: () => ({ projects: [{ id: 'p1', title: 'repo', workspaceRoot: '/repo' }], nextCursor: null }),
@@ -121,9 +123,9 @@ function harness(t: Ticket, report: WorkerReport | string = { state: 'ready', su
     report: vi.fn((ticketId: string, value: WorkerReport) => { reports.push([ticketId, value]); return repo.tickets.get(ticketId)! }),
   }
   const host: T3ExecutorHost = {
-    engine: api, store: { tickets: repo.tickets, triggers: repo.triggers, settings: () => settings },
+    engine: api, store: { tickets: repo.tickets, triggers: repo.triggers, threads: repo.threads, settings: () => settings },
     machine: { stateDir: dir }, lifetime: new AbortController().signal,
-    deployment: () => ({ github: { cli: 'gh', login: 'agent', noreply: 'agent@users.noreply.github.com' }, stateDir: dir }),
+    deployment: () => ({ github: { cli: 'gh', login: 'agent', noreply: 'agent@users.noreply.github.com', configDir: join(dir, 'gh-config') }, stateDir: dir }),
     environment: () => [], sourceLink: async () => ({}), repliedTo: () => undefined, closing: () => false,
   }
   return { repo, host, engine, fetchImpl: fake.fetchImpl, mcpCalls: fake.calls, dir }
@@ -183,6 +185,53 @@ describe('T3 executor', () => {
     expect(h.engine.started).toContainEqual(['t1', 'a2'])
   })
 
+  it('rebinds a T3 thread that a person resumed by hand after the first launch failed', async () => {
+    const t = ticket()
+    t.assignments[0] = { ...t.assignments[0]!, state: 'running', report: { state: 'failed', summary: 'approval required', at: AT } }
+    t.assignments.push({ id: 'a2', state: 'pending', createdAt: AT })
+    const h = harness(t)
+    const mcp = fakeMcp({
+      t3_project_list: () => ({ projects: [{ id: 'p1', title: 'repo', workspaceRoot: '/repo' }], nextCursor: null }),
+      t3_thread_list: () => ({ threads: [{ threadId: `mcp:launch:${'a'.repeat(64)}`, title: 'Fix the bug [t1]', createdAt: AT,
+        parentThreadId: null, settled: false }], nextCursor: null, total: 1 }),
+      t3_thread_send: () => ({ threadId: `mcp:launch:${'a'.repeat(64)}`, runId: 'run-2', status: 'running', delivery: 'queued' }),
+      t3_thread_wait: () => ({ status: 'completed', timedOut: false, runId: 'run-2' }),
+      t3_thread_read: () => ({ thread: { threadId: `mcp:launch:${'a'.repeat(64)}`, status: 'idle', pendingRequestCount: 0 },
+        items: [{ itemId: 'm2', type: 'assistant_message', runId: 'run-2', text: 'done',
+          textTruncated: false }], recentRuns: [], nextPosition: null, hasMore: false }),
+    })
+    const run = executor(h, { fetchImpl: mcp.fetchImpl })
+    run.start(t, t.assignments[1]!)
+    await run.idle()
+    expect(mcp.calls.filter(call => call.params?.name === 't3_thread_launch')).toHaveLength(0)
+    expect(mcp.calls.filter(call => call.params?.name === 't3_thread_send')).toHaveLength(1)
+    expect(h.engine.started).toContainEqual(['t1', 'a2'])
+  })
+
+  it('rebinds a manually resumed thread when a person\'s message reaches a failed ticket', async () => {
+    const t = ticket()
+    t.assignments[0] = { ...t.assignments[0]!, state: 'running', report: { state: 'failed', summary: 'approval required', at: AT } }
+    t.inputs.push({ id: 'i1', kind: 'trigger', triggerId: 'tr2', at: AT, human: true })
+    t.undelivered = ['i1']
+    const h = harness(t)
+    const mcp = fakeMcp({
+      t3_project_list: () => ({ projects: [{ id: 'p1', title: 'repo', workspaceRoot: '/repo' }], nextCursor: null }),
+      t3_thread_list: () => ({ threads: [{ threadId: `mcp:launch:${'b'.repeat(64)}`, title: 'Fix the bug [t1]', createdAt: AT,
+        parentThreadId: null, settled: false }], nextCursor: null, total: 1 }),
+      t3_thread_send: args => ({ threadId: args.threadId, runId: 'run-3', status: 'running', delivery: 'queued' }),
+      t3_thread_wait: () => ({ status: 'completed', timedOut: false, runId: 'run-3' }),
+      t3_thread_read: () => ({ thread: { threadId: `mcp:launch:${'b'.repeat(64)}`, status: 'idle', pendingRequestCount: 0 },
+        items: [{ itemId: 'm3', type: 'assistant_message', runId: 'run-3', text: '```psa-report\n' + JSON.stringify({ schema_version: 1,
+          report_id: 'r-status', ticket_id: 't1', assignment_id: 'a1', state: 'ready', summary: '改好了，CI 通过，等待合并' }) + '\n```',
+          textTruncated: false }], recentRuns: [], nextPosition: null, hasMore: false }),
+    })
+    const run = executor(h, { fetchImpl: mcp.fetchImpl })
+    run.deliver(t, t.assignments[0]!)
+    await run.idle()
+    expect(mcp.calls.some(call => call.params?.name === 't3_thread_send')).toBe(true)
+    expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'ready', summary: '改好了，CI 通过，等待合并' })
+  })
+
   it('prefers an exact T3 project over a parent workspace root', async () => {
     const t = ticket()
     const h = harness(t)
@@ -192,7 +241,8 @@ describe('T3 executor', () => {
       t3_thread_launch: () => ({ threadId: 'thread-1', runId: 'run-1', status: 'running' }),
       t3_thread_wait: () => ({ status: 'completed', timedOut: false, runId: 'run-1' }),
       t3_thread_read: () => ({ thread: { threadId: 'thread-1', status: 'idle', pendingRequestCount: 0 },
-        items: [{ itemId: 'm1', type: 'assistant_message', runId: 'run-1', text: '```psa-report\n{"state":"ready","summary":"ok"}\n```',
+        items: [{ itemId: 'm1', type: 'assistant_message', runId: 'run-1',
+          text: '```psa-report\n{"schema_version":1,"report_id":"r1","ticket_id":"t1","assignment_id":"a1","state":"ready","summary":"ok"}\n```',
           textTruncated: false }], recentRuns: [], nextPosition: null, hasMore: false }),
     })
     const run = executor(h, { project: '/repo/worktrees/wt', fetchImpl: mcp.fetchImpl })
@@ -255,7 +305,8 @@ describe('T3 executor', () => {
     const spawn = fakeSpawn(call => {
       if (call.args.includes('start')) return { stdout: '{"threadId":"thread-cli","runId":"run-cli"}\n' }
       return { stdout: JSON.stringify({ thread: { threadId: 'thread-cli', status: 'idle' },
-        messages: [{ role: 'assistant', runId: 'run-cli', text: '```psa-report\n{"state":"ready","summary":"cli done"}\n```' }] }) }
+        messages: [{ role: 'assistant', runId: 'run-cli',
+          text: '```psa-report\n{"schema_version":1,"report_id":"r-cli","ticket_id":"t1","assignment_id":"a1","state":"ready","summary":"cli done"}\n```' }] }) }
     })
     const run = executor(h, { fetchImpl: (async () => new Response('no', { status: 401 })) as typeof fetch, spawnImpl: spawn.spawnImpl })
     run.start(t, t.assignments[0]!)
@@ -275,19 +326,53 @@ describe('T3 executor', () => {
     expect(h.engine.reports.at(-1)?.[1].summary).toContain('T3_IDENTITY_MISMATCH')
     expect(h.mcpCalls.some(call => call.params?.name === 't3_thread_launch')).toBe(false)
   })
+
+  it('blocks instead of guessing when the final message has no valid psa-report', async () => {
+    const t = ticket()
+    const h = harness(t, 'I finished the change, but forgot the report block.')
+    const run = executor(h)
+    run.start(t, t.assignments[0]!)
+    await run.idle()
+    expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'blocked' })
+    expect(h.engine.reports.at(-1)?.[1].summary).toContain('psa-report 解析失败')
+  })
+
+  it('ignores a report bound to an older assignment instead of overwriting the running one', async () => {
+    const t = ticket()
+    const h = harness(t, `done\n\`\`\`psa-report\n${JSON.stringify({ schema_version: 1, report_id: 'r-old', ticket_id: 't1',
+      assignment_id: 'a0', state: 'ready', summary: 'old run' })}\n\`\`\``)
+    const run = executor(h)
+    run.start(t, t.assignments[0]!)
+    await run.idle()
+    expect(h.engine.reports).toEqual([])
+  })
+
+  it('blocks a contradictory report rather than repairing it', async () => {
+    const t = ticket()
+    const h = harness(t, { state: 'ready', summary: 'done', question: 'but also a question' } as WorkerReport)
+    const run = executor(h)
+    run.start(t, t.assignments[0]!)
+    await run.idle()
+    expect(h.engine.reports.at(-1)?.[1]).toMatchObject({ state: 'blocked' })
+    expect(h.engine.reports.at(-1)?.[1].summary).toContain('ready 报告不能带 question')
+  })
 })
 
 describe('psa-report parser', () => {
+  const report = (overrides: Record<string, unknown> = {}) => JSON.stringify({ schema_version: 1, report_id: 'r1', ticket_id: 't1', assignment_id: 'a1',
+    state: 'ready', summary: 'ok', ...overrides })
   it('reads the last fenced block, a PSA_REPORT line, and a bare JSON object', () => {
-    expect(parsePsaReport('work\n```psa-report\n{"state":"ready","summary":"ok"}\n```\n')).toEqual({ state: 'ready', summary: 'ok' })
-    expect(parsePsaReport('work\nPSA_REPORT: {"state":"blocked","summary":"need a key","question":"which key?"}')).toEqual({
-      state: 'blocked', summary: 'need a key', question: 'which key?' })
-    expect(parsePsaReport('{"state":"dropped","summary":"nothing to do"}')).toEqual({ state: 'dropped', summary: 'nothing to do' })
+    expect(parsePsaReport(`work\n\`\`\`psa-report\n${report()}\n\`\`\`\n`)).toMatchObject({ state: 'ready', summary: 'ok' })
+    expect(parsePsaReport(`work\nPSA_REPORT: ${report({ state: 'blocked', summary: 'need a key', question: 'which key?' })}`))
+      .toMatchObject({ state: 'blocked', summary: 'need a key', question: 'which key?' })
+    expect(parsePsaReport(report({ state: 'dropped', summary: 'nothing to do' }))).toMatchObject({ state: 'dropped', summary: 'nothing to do' })
   })
 
-  it('ignores malformed or unknown states', () => {
+  it('rejects a report without the schema version or binding fields, unknown states, and unknown fields', () => {
     expect(parsePsaReport('```psa-report\n{"state":"done","summary":"x"}\n```')).toBeUndefined()
-    expect(parsePsaReport('```psa-report\n{"summary":"x"}\n```')).toBeUndefined()
+    expect(parsePsaReport(`\`\`\`psa-report\n${report({ schema_version: 2 })}\n\`\`\``)).toBeUndefined()
+    expect(parsePsaReport(`\`\`\`psa-report\n${report({ ticket_id: undefined })}\n\`\`\``)).toBeUndefined()
+    expect(parsePsaReport(`\`\`\`psa-report\n${report({ surprise: true })}\n\`\`\``)).toBeUndefined()
     expect(parsePsaReport('plain prose')).toBeUndefined()
   })
 })

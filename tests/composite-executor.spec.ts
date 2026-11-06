@@ -96,9 +96,9 @@ function t3Harness(tickets: Ticket[]) {
     assignmentInterrupted: vi.fn(),
     report: vi.fn((ticketId: string, report: WorkerReport) => { reports.push([ticketId, report]); return repo.tickets.get(ticketId)! }),
   }
-  const host = { engine: api, store: { tickets: repo.tickets, triggers: repo.triggers, settings: () => SettingsSchema.parse({}) },
+  const host = { engine: api, store: { tickets: repo.tickets, triggers: repo.triggers, threads: repo.threads, settings: () => SettingsSchema.parse({}) },
     machine: { stateDir: dir }, lifetime: new AbortController().signal, health: undefined,
-    deployment: () => ({ github: { cli: 'gh', login: 'agent', noreply: 'agent@users.noreply.github.com' }, stateDir: dir }),
+    deployment: () => ({ github: { cli: 'gh', login: 'agent', noreply: 'agent@users.noreply.github.com', configDir: join(dir, 'gh-config') }, stateDir: dir }),
     environment: () => [], sourceLink: async () => ({}), repliedTo: () => undefined, closing: () => false }
   const mcp = fakeMcp()
   const write = new T3Executor(host, { project: '/repo', mcpUrl: 'http://t3/mcp', mcpToken: 'token', fetchImpl: mcp.fetchImpl,
