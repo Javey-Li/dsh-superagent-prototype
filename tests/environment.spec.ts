@@ -1,11 +1,11 @@
 import { execFile, spawn } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SENSITIVE_ENV_PATTERN, type SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { GIT_LOCATION, agentVariables, credentialHelper, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
+import { GIT_LOCATION, agentVariables, credentialHelper, linkAgentConfigDir, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
   from '../src/infra/environment.ts'
 import { CliError } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -186,5 +186,20 @@ describe('the repository the host\'s environment names', () => {
       for (const name of GIT_LOCATION) expect(env, name).not.toHaveProperty(name)
       expect(env.GIT_CEILING_DIRECTORIES).toBe(dir)
     } finally { vi.unstubAllEnvs() }
+  })
+})
+
+describe('agent gh configuration link', () => {
+  it('links the default gh-config to a configured directory at setup, and leaves anything already there alone', async () => {
+    const agent = join(dir, 'gh-agent')
+    expect(await linkAgentConfigDir(dir, agent)).toBe(join(dir, 'gh-config'))
+    expect(readlinkSync(join(dir, 'gh-config'))).toBe(agent)
+    expect(await linkAgentConfigDir(dir, join(dir, 'gh-other'))).toBeUndefined()
+    expect(readlinkSync(join(dir, 'gh-config'))).toBe(agent)
+  })
+  it('does nothing for an empty configuration or one that already is the default', async () => {
+    expect(await linkAgentConfigDir(dir, '')).toBeUndefined()
+    expect(await linkAgentConfigDir(dir, join(dir, 'gh-config'))).toBeUndefined()
+    expect(() => lstatSync(join(dir, 'gh-config'))).toThrow()
   })
 })

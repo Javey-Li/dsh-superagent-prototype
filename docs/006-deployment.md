@@ -49,6 +49,12 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
    `<stateDir>/gh-config`). Setup runs `gh api user --jq .login` through the worker shim and refuses an identity other than
    the resolved agent account.
 
+   The directory is resolved when setup runs, not when the process starts, so you can save the GitHub Source's
+   `configDir` after the instance is up and polling picks it up on the next command. When `configDir` names another
+   directory and nothing exists at `<stateDir>/gh-config`, setup links that path to it, so tools that assume the default
+   (a T3 server started earlier, a `gh` you run by hand) reach the same agent identity. An existing file, directory or link
+   at `<stateDir>/gh-config` is never replaced; remove it yourself to relink.
+
    A T3 server starts its own providers, so it does not inherit the DSH process environment. Start T3 with the same
    `GH_CONFIG_DIR`, `GIT_CONFIG_GLOBAL=<stateDir>/worker-gitconfig`, `GIT_CONFIG_NOSYSTEM=1`, no `GH_TOKEN`/`GITHUB_TOKEN`,
    and an empty `SSH_AUTH_SOCK`. `scripts/t3-doctor.ts` checks the listening T3 process environment; `docs/009-pilot-guard.md`
@@ -223,6 +229,7 @@ The blocks:
 
 - `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
 - `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
+- `source:schedule`: `{"enabled": true, "config": {…}}` with `cron`, `timezone`, `checkSeconds`, `catchUpHours` and the `role` (see `examples/fretsense-user-sim.settings.json`). Its config has required fields, so before the first save `GET settings` shows it as `{"enabled": false, "config": {}}` with revision 0, and `PUT settings/source:schedule` accepts a complete config (an incomplete one is a 400 with `issues`). This lets you start an instance first and import `examples/*.settings.json` afterwards; the watcher reports `Off` until a valid enabled config exists and then picks it up on its next check, with no restart.
 - `eval`: `mode`, `timeoutSeconds` and `model`.
 - `executor`: `backend`, `model`, `maxWorkers`, `directory`, `prepare`, `blockedCommands` and `t3`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
 

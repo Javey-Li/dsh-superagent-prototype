@@ -29,6 +29,13 @@ describe('account-isolated operations', () => {
       expect(output).not.toContain('GH_TOKEN=')
     } finally { delete process.env.GH_TOKEN }
   })
+  it('reads a function environment on every command, so a gh configuration directory resolved after startup reaches later commands', async () => {
+    let configDir = '/state/gh-config'
+    const commands = new Commands(() => deployment, () => ({ GH_CONFIG_DIR: configDir }), new AbortController().signal)
+    expect(await commands.run('env', [])).toContain('GH_CONFIG_DIR=/state/gh-config')
+    configDir = '/home/me/.config/gh-agent'
+    expect(await commands.run('env', [])).toContain('GH_CONFIG_DIR=/home/me/.config/gh-agent')
+  })
   it('refuses Feishu commands when the deployment has no Feishu bot', async () => {
     await expect(new Commands(() => testDeployment({ feishu: undefined }), {}, new AbortController().signal).lark(['im', '+chat-list'])).rejects.toThrow('The Feishu Source has no working bot CLI')
   })

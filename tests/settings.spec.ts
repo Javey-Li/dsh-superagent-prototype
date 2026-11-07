@@ -1,9 +1,11 @@
 /** Concurrency, retry, and validation tests for settings saves, pause toggling, and policy synchronization. */
+import { readFileSync } from 'node:fs'
 import { afterEach, expect, it, vi } from 'vitest'
 import { UserError } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { Setup } from '../src/app/setup.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
+import { scheduleKind } from '../src/sources/schedule.ts'
 import { startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host | undefined
@@ -98,4 +100,38 @@ it('records nothing for a pause that changes nothing, refuses a sync while setup
   await expect(settings.sync('feishu')).rejects.toThrow(new UserError('nothingToSync', { source: 'feishu' }))
   vi.mocked(Setup.prototype.configured).mockRestore()
   expect(() => settings.block('source:x')).toThrow(new UserError('unknownBlock', { block: 'source:x' }))
+})
+
+it('reads and saves the Schedule Source before any schedule configuration exists, so an instance can be configured before its watcher runs', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  h.runtime.sources.register(scheduleKind)
+  expect(store.settings().sources.schedule).toBeUndefined()
+  expect(settings.view().sources.find(source => source.id === 'schedule')).toMatchObject({ enabled: false, installed: true })
+  const empty = settings.block('source:schedule')
+  expect(empty).toMatchObject({ block: 'source:schedule', value: { enabled: false, config: {} } })
+  const listed = await h.api('GET', 'settings')
+  expect(listed.status).toBe(200)
+  expect((listed.body.sources as { id: string }[]).map(source => source.id)).toContain('schedule')
+  const sample = JSON.parse(readFileSync(new URL('../examples/fretsense-user-sim.settings.json', import.meta.url), 'utf8')) as
+    { sources: { schedule: { enabled: boolean; config: unknown } } }
+  const invalid = await h.api('PUT', 'settings/source:schedule', { value: { enabled: true, config: {} }, revision: empty.revision })
+  expect(invalid.status).toBe(400)
+  expect(invalid.body.error).toContain('Invalid settings')
+  const saved = await h.api('PUT', 'settings/source:schedule', { value: sample.sources.schedule, revision: empty.revision })
+  expect(saved.status).toBe(200)
+  expect(saved.body).toMatchObject({ saved: true, restarting: false })
+  expect(settings.block('source:schedule').value).toMatchObject({ enabled: true, config: { cron: '30 2 * * *', timezone: 'Asia/Tokyo' } })
+})
+
+it('hands commands the configured agent gh directory once setup resolved it, and the state directory default before', async () => {
+  h = await startRuntime()
+  const { setup } = h.runtime
+  const resolved = setup.deployment
+  expect(setup.commandEnvironment.GH_CONFIG_DIR).toBe(resolved.github.configDir)
+  expect(resolved.github.configDir).not.toBe('')
+  const before = (setup as unknown as { resolved?: unknown }).resolved
+  ;(setup as unknown as { resolved?: unknown }).resolved = undefined
+  expect(setup.commandEnvironment.GH_CONFIG_DIR).toBe(`${resolved.stateDir}/gh-config`)
+  ;(setup as unknown as { resolved?: unknown }).resolved = before
 })

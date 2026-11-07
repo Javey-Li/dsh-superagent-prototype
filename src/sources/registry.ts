@@ -130,9 +130,15 @@ export class SourceRegistry implements SourceScope {
     if (!instance.enabled) return { listened: false, reason: 'source_disabled' }
     return kind.scope ? kind.scope({ meta: input.meta }, instance.config) : { listened: true, observed: false }
   }
-  /** Falls back to schema defaults and disables the instance when stored configuration fails validation. */
+  /**
+   * Falls back to schema defaults and disables the instance when stored configuration fails validation. A kind with required
+   * fields and no stored configuration (such as Schedule) has no defaults to fall back to, so it appears disabled with its stored
+   * configuration (or `{}`) and stays readable and savable until a valid one arrives.
+   */
   private resolve(kind: SourceKind, stored: { enabled: boolean; config: Record<string, unknown> } | undefined): SourceInstance {
     const parsed = kind.schema.safeParse(stored?.config ?? {})
-    return { id: kind.kind, kind: kind.kind, enabled: parsed.success && (stored?.enabled ?? true), config: parsed.success ? parsed.data : kind.schema.parse({}) }
+    if (parsed.success) return { id: kind.kind, kind: kind.kind, enabled: stored?.enabled ?? true, config: parsed.data }
+    const defaults = kind.schema.safeParse({})
+    return { id: kind.kind, kind: kind.kind, enabled: false, config: defaults.success ? defaults.data : stored?.config ?? {} }
   }
 }

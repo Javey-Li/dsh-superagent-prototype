@@ -3,7 +3,7 @@
  * Variables read by workers avoid `KEY|PASSWORD|SECRET|TOKEN` in their names because DSH strips credential-shaped variables from child environments.
  * Provides default-path guardrails rather than an OS-level security boundary, as workers run under the operator's OS user.
  */
-import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, rename, symlink, unlink, writeFile } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
@@ -115,6 +115,21 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
     // Include Git LFS filters because the operator's global gitconfig (which usually holds them) is ignored.
     '[filter "lfs"]', '\tclean = git-lfs clean -- %f', '\tsmudge = git-lfs smudge -- %f', '\tprocess = git-lfs filter-process', '\trequired = true',
   ].join('\n') + '\n')
+}
+
+/**
+ * Links the default `<stateDir>/gh-config` to the configured agent gh directory when nothing exists at the default path yet, so
+ * tools that assume the default location (a T3 server started before setup, a hand-run `gh`) reach the same agent identity.
+ * Anything already at the default path, including a dangling link, is left alone.
+ * @returns The link's path when this call created it.
+ */
+export async function linkAgentConfigDir(stateDir: string, configDir: string): Promise<string | undefined> {
+  const link = join(stateDir, 'gh-config')
+  if (!configDir || resolve(configDir) === resolve(link)) return undefined
+  try { await lstat(link); return undefined } catch { /* Nothing at the default path yet. */ }
+  await mkdir(stateDir, { recursive: true })
+  await symlink(configDir, link, 'dir')
+  return link
 }
 
 /** Applies environment overrides and prepends worker shims to `process.env.PATH`, returning a restore callback. */
