@@ -12,6 +12,7 @@ import { feishuChannel, feishuTrigger, feishuTriggerId } from '../src/sources/fe
 import { testDeployment } from './fixtures/deployment.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind } from '../src/sources/github.ts'
+import { scheduleKind } from '../src/sources/schedule.ts'
 
 const probe: SourceKind<{ interval: number }> = {
   kind: 'probe', title: { zh: '探针', en: 'Probe' }, description: { zh: '', en: '' }, health: [],
@@ -30,6 +31,15 @@ describe('Source registry', () => {
       { id: 'probe', kind: 'probe', enabled: false, config: { interval: 9 }, installed: true },
       { id: 'retired', kind: 'retired', enabled: true, config: { x: 1 }, installed: false },
     ])
+  })
+  it('keeps a kind with required fields readable and disabled while it has no valid configuration', () => {
+    let settings = SettingsSchema.parse({})
+    const sources = new SourceRegistry(() => settings)
+    sources.register(scheduleKind)
+    expect(sources.instances()).toEqual([{ id: 'schedule', kind: 'schedule', enabled: false, config: {}, installed: true }])
+    expect(sources.instance('schedule')).toMatchObject({ enabled: false, config: {} })
+    settings = SettingsSchema.parse({ sources: { schedule: { enabled: true, config: { cron: 'bad' } } } })
+    expect(sources.instance('schedule')).toMatchObject({ enabled: false, config: {} })
   })
   it('validates submitted instances with the kind schema and refuses kinds that are not installed', () => {
     const sources = new SourceRegistry(() => SettingsSchema.parse({}))
