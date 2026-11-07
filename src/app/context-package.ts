@@ -25,6 +25,13 @@ export interface ContextSignal {
   /** Resource that holds the full text; omitted when the item has none. */
   read?: string
 }
+export interface ContextRequirement {
+  at: string
+  actor: string
+  triggerId: string
+  preview: string
+  read: string
+}
 export type AssociationKind = 'issue' | 'pull' | 'review' | 'ci' | 'thread'
 export interface ContextAssociation {
   kind: AssociationKind
@@ -44,6 +51,7 @@ export interface ContextPackage {
   request: { triggerId: string; actor: string; at: string; preview: string; read: string }
   progress: { assignment: number; state: string; lastReport?: { state: string; summary: string; at: string }; question?: string }
   signals: ContextSignal[]
+  requirements?: ContextRequirement[]
   associations: ContextAssociation[]
   recall: { read: string; holds: string }[]
   budget: { limit: number; used: number; omitted: number }
@@ -60,6 +68,12 @@ const stageName = (ticket: Ticket): string => {
   return stage.stage === 'person' ? `person/${stage.action}` : stage.stage === 'working' ? `working${stage.action ? `/${stage.action}` : ''}` : stage.stage
 }
 
+/** Whether a human Trigger states a requirement, rather than a review, CI result, or context-only message. */
+function requirementTrigger(trigger: Trigger): boolean {
+  const meta = trigger.meta
+  return trigger.human && meta.ci !== true && meta.kind !== 'review' && meta.kind !== 'inline'
+}
+
 /** Classify one input for the recent-signals section. Review and CI are read from the source meta the adapter stored. */
 function signalOf(input: TicketInput, trigger: Trigger | undefined): ContextSignal | undefined {
   const at = input.at
@@ -71,7 +85,7 @@ function signalOf(input: TicketInput, trigger: Trigger | undefined): ContextSign
   if (!trigger) return { kind: 'comment', at, human: false, preview: `Trigger ${input.triggerId}` }
   const meta = trigger.meta
   const kind: SignalKind = meta.ci === true ? 'ci' : meta.kind === 'review' || meta.kind === 'inline' ? 'review'
-    : trigger.human ? 'requirement' : 'comment'
+    : trigger.human && !input.context ? 'requirement' : 'comment'
   return { kind, at, actor: trigger.actor.id || undefined, human: trigger.human, preview: clip(trigger.text, PREVIEW),
     read: `trigger/${trigger.id}` }
 }
@@ -130,7 +144,19 @@ export function ticketContextPackage(records: ContextRecords, ticket: Ticket, op
   const budget = options.budgetChars ?? DEFAULT_BUDGET
   const previewChars = options.previewChars ?? PREVIEW
   const origin = records.triggers.get(ticket.origin.triggerId)
+  const requirements: ContextRequirement[] = []
+  const requirementInputs = new Set<string>()
+  for (const input of ticket.inputs) {
+    if (input.kind !== 'trigger' || input.context) continue
+    const trigger = records.triggers.get(input.triggerId)
+    if (!trigger || !requirementTrigger(trigger)) continue
+    requirementInputs.add(input.id)
+    requirements.push({ at: input.at, actor: trigger.actor.id, triggerId: trigger.id,
+      preview: clip(trigger.text, previewChars), read: `trigger/${trigger.id}` })
+  }
+  requirements.sort((a, b) => b.at.localeCompare(a.at))
   const allSignals = ticket.inputs.flatMap(input => {
+    if (requirementInputs.has(input.id)) return []
     const signal = signalOf(input, input.kind === 'trigger' ? records.triggers.get(input.triggerId) : undefined)
     return signal ? [{ ...signal, preview: clip(signal.preview, previewChars) }] : []
   }).sort((a, b) => b.at.localeCompare(a.at))
@@ -151,6 +177,7 @@ export function ticketContextPackage(records: ContextRecords, ticket: Ticket, op
       ...report ? { lastReport: { state: report.state, summary: clip(report.summary, 500), at: report.at } } : {},
       ...ticket.attention ? { question: ticket.attention.question } : {} },
     signals,
+    ...requirements.length ? { requirements } : {},
     associations,
     recall: [...new Set([`ticket/${ticket.id}`, `ticket/${ticket.id}/inputs`, `ticket/${ticket.id}/summary`,
       ...signals.flatMap(signal => signal.read ? [signal.read] : []), ...associations.flatMap(item => item.read ? [item.read] : [])])]
@@ -159,9 +186,14 @@ export function ticketContextPackage(records: ContextRecords, ticket: Ticket, op
     budget: { limit: budget, used: 0, omitted: Math.max(0, allSignals.length - signals.length) },
   }
   let used = JSON.stringify(pkg).length
-  // Drop the oldest signals until the package fits; the recall pointers stay, so nothing is lost.
-  while (used > budget && pkg.signals.length > 1) {
+  // Drop ordinary signals first. Only when none remain do the oldest requirements go, keeping the newest one.
+  while (used > budget && pkg.signals.length > (pkg.requirements?.length ? 0 : 1)) {
     pkg.signals.pop()
+    pkg.budget.omitted += 1
+    used = JSON.stringify(pkg).length
+  }
+  while (used > budget && (pkg.requirements?.length ?? 0) > 1) {
+    pkg.requirements!.pop()
     pkg.budget.omitted += 1
     used = JSON.stringify(pkg).length
   }
@@ -183,6 +215,11 @@ export function renderTicketContext(pkg: ContextPackage): string {
     ...pkg.associations.length ? pkg.associations.map(item => `- ${item.kind} ${item.ref}: ${item.state}${item.at ? ` at ${item.at}` : ''}${item.latest ? ` — ${item.latest}` : ''}${item.read ? ` [read ${item.read}]` : ''}`)
       : ['- none recorded'],
     '',
+    ...pkg.requirements?.length ? [
+      'Human requirements (newest first):',
+      ...pkg.requirements.map(requirement => `- ${requirement.at} ${requirement.actor}: ${requirement.preview} [read ${requirement.read}]`),
+      '',
+    ] : [],
     `Recent signals (newest first${pkg.budget.omitted ? `; ${pkg.budget.omitted} older omitted` : ''}):`,
     ...pkg.signals.length ? pkg.signals.map(signal => `- ${signal.at} ${signal.kind}${signal.actor ? ` ${signal.actor}` : ''}: ${signal.preview}${signal.read ? ` [read ${signal.read}]` : ''}`)
       : ['- none'],
