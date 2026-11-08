@@ -3,7 +3,7 @@
  * allowed member Alice (`ou_alice`), listened chat `oc_team`, and `auto` eval mode. Stop it with `stop()`.
  */
 import { Context } from '@deepseek-ai/cordis'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { vi, type Mock } from 'vitest'
@@ -131,9 +131,14 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
   return { service, settle, spawn, live: (id: string) => !!children.get(id)?.live }
 }
 
-/** @param seed - writes to the database before the Runtime opens it, such as records an earlier version stored. */
-export async function startRuntime(seed?: (store: Store) => void) {
-  const directory = mkdtempSync(join(tmpdir(), 'orchestrator-host-'))
+/**
+ * @param seed - writes to the database before the Runtime opens it, such as records an earlier version stored.
+ * @param options.stateDir - a fixed state directory to reuse instead of a fresh temporary one, so a test can stop the
+ *   Runtime, keep the directory, and start a new Runtime over the same SQLite state, T3 ledger, and worktrees.
+ */
+export async function startRuntime(seed?: (store: Store) => void, options: { stateDir?: string } = {}) {
+  const directory = options.stateDir ?? mkdtempSync(join(tmpdir(), 'orchestrator-host-'))
+  mkdirSync(directory, { recursive: true })
   const AGENT = join(directory, 'agent-gh'), BOT = join(directory, 'lark-bot')
   const repository = { default_branch: 'master', permissions: { push: true } }
   vi.spyOn(Commands.prototype, 'gh').mockImplementation(async args => args[1] === 'user' ? { login: 'agent-bot' } : repository)
@@ -244,7 +249,16 @@ export async function startRuntime(seed?: (store: Store) => void) {
     jobs: jobs.service, subagents: subagents.service }
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
-  for (const cli of [AGENT, BOT]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
+  // The agent CLI answers the identity probe T3 runs as a subprocess with a fixed login; other calls fall back to `{}`.
+  // Tests that go through `Commands` stub it there instead and never execute this file.
+  writeFileSync(AGENT, `#!/bin/sh
+case "$*" in
+  *"--jq .login"*) printf 'agent-bot\\n' ;;
+  "api user") printf '{"login":"agent-bot","id":7}\\n' ;;
+  *) printf '{}\\n' ;;
+esac
+`, { mode: 0o755 })
+  writeFileSync(BOT, '#!/bin/sh\n', { mode: 0o755 })
   const seeded = new Store(join(directory, 'orchestrator.sqlite'))
   const sources = { github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT } }, feishu: { enabled: true, config: { cli: BOT } } }
   seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), sources }))
@@ -289,7 +303,11 @@ export async function startRuntime(seed?: (store: Store) => void) {
     await http(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
-  async function stop() { await runtime.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) }
+  /** Stop the Runtime; `keepDirectory` leaves the state directory, SQLite database, T3 ledger, and worktrees for a restart. */
+  async function stop(stopOptions: { keepDirectory?: boolean } = {}) {
+    await runtime.stop(); vi.restoreAllMocks()
+    if (!stopOptions.keepDirectory) rmSync(directory, { recursive: true, force: true })
+  }
   /** The Session's model takes its next step, which takes the messages steered in since its last. */
   const step = (sessionId: string) => { steps.get(sessionId)!() }
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */

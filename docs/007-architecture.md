@@ -425,6 +425,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
 | `tests/t3-executor.spec.ts` | The T3 executor: existing-worktree binding, idempotent launch, thread continuity, rebinding a manually resumed thread, input delivery, interruption, identity checks, CLI fallback, and the `psa-report` parser |
+| `tests/e2e/f16-context-restart.live.spec.ts` | F16 live proof, skipped unless `F16_E2E=1`: a mid-work human requirement kept in the Ticket context and the worker across a real T3 restart, nine CI/review signals, two Assignments in one T3 thread, and the worker's own ready reports |
 | `tests/composite-executor.spec.ts` | Composite routing by Mandate line, the two-write quota and its release on stop and retry, and the independent read line |
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |
 | `tests/effects.spec.ts` | The effect queue: coalescing, limits, retries with backoff, health and shutdown |
