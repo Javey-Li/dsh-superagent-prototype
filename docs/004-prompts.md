@@ -62,9 +62,10 @@ Executors also read DeepSeek Harness's coding prompt and the repository's `AGENT
 
 An Assignment's first message also carries a one-page Ticket context: state and stage, the Mandate, the original request, the
 latest report, the Issue/pull-request/review/CI associations the Ticket follows, recent signals, and `read` pointers to the
-full text. The page is deterministic and bounded; older signals are dropped from it first and remain available through
-`ticket/<id>/inputs` or `trigger/<id>`. An agent answers a status question from this page and reads further only when needed,
-so a person can ask whether work is done the next day without the main Session reconstructing history.
+full text. Human requirements a person adds mid-work are listed before ordinary signals and kept while the budget allows;
+ordinary signals are dropped first, then the oldest requirements, always keeping the newest one. Everything dropped remains
+available through `ticket/<id>/inputs` or `trigger/<id>`. An agent answers a status question from this page and reads further
+only when needed, so a person can ask whether work is done the next day without the main Session reconstructing history.
 
 Executors work unattended. Their tools exclude those that ask a person, present UI to them or change the profile, such as `ask_user_question`, `present` and `plugin_manager`.
 

@@ -325,6 +325,71 @@ describe('subscription fan-out', () => {
     expect(() => h.engine.markUnrelated(first, 'gh:pr-9', 'its PR')).toThrow(new UserError('followedThread'))
   })
 })
+describe('ticket context requirements', () => {
+  it('keeps every mid-work human requirement when CI and review signals fill the limit', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    for (let id = 10; id < 20; id++) {
+      h.tick(1)
+      h.engine.receive(id % 2 ? trigger(String(id), { actor: guest, meta: { kind: 'review' } })
+        : trigger(String(id), { human: false, actor: { source: 'github', id: '' }, meta: { ci: true } }))
+    }
+    for (const id of [20, 21, 22]) {
+      h.tick(1)
+      h.engine.receive(trigger(String(id), { actor: guest, text: `requirement ${id}` }))
+    }
+    h.pump()
+    const pkg = ticketContextPackage(h.repo, h.repo.tickets.get(ticketId)!, { signals: 3 })
+    expect(pkg.signals).toHaveLength(3)
+    expect(pkg.signals.every(signal => signal.kind !== 'requirement')).toBe(true)
+    expect(pkg.requirements?.map(requirement => requirement.triggerId)).toEqual(['22', '21', '20'])
+    expect(pkg.requirements?.[0]).toEqual({ at: expect.any(String), actor: 'guest', triggerId: '22', preview: 'requirement 22',
+      read: 'trigger/22' })
+  })
+  it('leaves context-only, bot, review, note and status inputs out of human requirements', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.followForContext(ticketId, { source: 'chat', id: 'issue' })
+    h.tick(1); h.engine.receive(trigger('10', { threads: [{ source: 'chat', id: 'issue' }], text: 'context only' }))
+    h.tick(1); h.engine.receive(trigger('11', { human: false, text: 'bot message' }))
+    h.tick(1); h.engine.receive(trigger('12', { actor: guest, meta: { kind: 'review' }, text: 'review comment' }))
+    h.tick(1); h.engine.note(ticketId, 'note')
+    h.tick(1); h.engine.report(ticketId, { state: 'waiting', summary: 'waiting' })
+    expect(h.engine.requestStatus(ticketId)).toBe(true)
+    h.tick(1); h.engine.receive(trigger('13', { actor: guest, text: 'keep the active filter' }))
+    const pkg = ticketContextPackage(h.repo, h.repo.tickets.get(ticketId)!)
+    expect(pkg.requirements?.map(requirement => requirement.triggerId)).toEqual(['13'])
+  })
+  it('keeps the newest human requirement under a tiny budget, with the omitted count and inputs pointer', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    for (let id = 10; id < 25; id++) {
+      h.tick(1)
+      h.engine.receive(trigger(String(id), { actor: guest, text: `requirement ${id}` }))
+    }
+    h.pump()
+    const pkg = ticketContextPackage(h.repo, h.repo.tickets.get(ticketId)!, { budgetChars: 1 })
+    expect(pkg.requirements).toEqual([expect.objectContaining({ triggerId: '24', preview: 'requirement 24', read: 'trigger/24' })])
+    expect(pkg.signals).toEqual([])
+    expect(pkg.budget.omitted).toBe(14)
+    expect(pkg.budget.used).toBeGreaterThan(pkg.budget.limit)
+    expect(pkg.recall).toContainEqual({ read: `ticket/${ticketId}/inputs`, holds: 'older inputs, newest first' })
+    const summary = renderTicketContext(pkg)
+    expect(summary).toContain('Human requirements')
+    expect(summary).toContain('14 older omitted')
+    expect(summary).toContain(`ticket/${ticketId}/inputs`)
+  })
+  it('renders Human requirements before Recent signals', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.tick(1); h.engine.receive(trigger('10', { human: false, actor: { source: 'github', id: '' }, meta: { ci: true },
+      text: 'CI failed: unit tests' }))
+    h.tick(1); h.engine.receive(trigger('11', { actor: guest, text: 'keep the active filter' }))
+    const summary = renderTicketContext(ticketContextPackage(h.repo, h.repo.tickets.get(ticketId)!))
+    expect(summary.indexOf('Human requirements')).toBeGreaterThan(-1)
+    expect(summary.indexOf('Recent signals')).toBeGreaterThan(summary.indexOf('Human requirements'))
+  })
+})
 describe('resume and stop', () => {
   async function ended(h: ReturnType<typeof harness>, by: 'executor' | 'human') {
     const decision = accepted(h)
