@@ -25,7 +25,7 @@ export function observerTools(host: ObserverToolsHost, ticket: Ticket): Tool[] {
   return [
     tool({
       name: 'fretsense_user_sim_run',
-      description: 'Run the fixed FretSense seven-path desktop check once for this scheduled role, write run artifacts outside the read-only checkout, and return the run facts. This tool starts a local preview if needed; it never edits the checkout.',
+      description: 'Run the fixed FretSense seven-path desktop check once for this scheduled role, write run artifacts outside the read-only checkout, and return the run facts. It checks origin/main, builds that exact SHA in an independent build root when needed, and reports the remote and build SHAs under freshness. This tool starts or verifies the local preview; it never edits the checkout.',
       schema: z.object({}).strict(),
       execute: async (_args, signal) => {
         const { run, directory } = await prepare(signal)
@@ -34,6 +34,7 @@ export function observerTools(host: ObserverToolsHost, ticket: Ticket): Tool[] {
           run_id: run.runId,
           run_directory: directory,
           target: run.target,
+          freshness: run.freshness,
           git: run.git,
           steps: run.steps.map(step => ({ id: step.id, status: step.status, duration_ms: step.durationMs,
             screenshot: step.screenshot ? join(directory, step.screenshot) : undefined, reason: step.reason,

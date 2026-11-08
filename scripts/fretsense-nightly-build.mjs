@@ -1,0 +1,317 @@
+/** Builds the exact origin/main commit the nightly FretSense observer should test.
+ *
+ * The observer checkout is read-only. This module keeps a separate build root, checks out the
+ * explicit remote SHA there, installs the locked dependencies and records a build SHA marker.
+ * A failed build never falls back silently: callers get `failed` and may use a recorded
+ * last-good build only after marking it stale.
+ */
+import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
+
+export const PROXY_ENV_KEYS = ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']
+const SHA = /^[0-9a-f]{40}$/
+
+/** Read the enabled macOS system proxy. The shell proxy may point at another port, so callers strip it. */
+export function parseScutilProxy(text) {
+  const values = {}
+  for (const line of String(text).split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z0-9]+)\s*:\s*(.*?)\s*$/)
+    if (match) values[match[1]] = match[2]
+  }
+  const enabled = values.HTTPEnable === '1' || values.HTTPSEnable === '1' || values.SOCKSEnable === '1'
+  const host = values.HTTPSProxy || values.HTTPProxy || values.SOCKSProxy
+  const port = values.HTTPSPort || values.HTTPPort || values.SOCKSPort
+  if (!enabled || !host || !port) return undefined
+  return { host, port, url: `http://${host}:${port}` }
+}
+
+function withoutAmbientCredentials(env) {
+  const clean = { ...env }
+  for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'NPM_TOKEN', 'NODE_AUTH_TOKEN',
+    'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']) delete clean[key]
+  return clean
+}
+
+/** Strip all six shell proxy variables and, when scutil reports a proxy, use that single port. */
+export function networkEnv(base = process.env, systemProxy) {
+  const env = withoutAmbientCredentials(base)
+  for (const key of PROXY_ENV_KEYS) delete env[key]
+  if (!systemProxy) return env
+  for (const key of PROXY_ENV_KEYS) env[key] = systemProxy.url
+  return env
+}
+
+/** A build must not inherit tokens, but still needs the system proxy for the locked dependency install. */
+export function buildEnv(base = process.env, systemProxy) {
+  return {
+    ...networkEnv(base, systemProxy),
+    NO_UPDATE_NOTIFIER: '1',
+    npm_config_fund: 'false',
+    npm_config_audit: 'false',
+    npm_config_update_notifier: 'false',
+  }
+}
+
+/** Run a command without throwing; callers decide whether a non-zero exit is a failure. */
+export function defaultRun(argv, options = {}) {
+  try {
+    const stdout = execFileSync(argv[0], argv.slice(1), {
+      cwd: options.cwd,
+      env: options.env,
+      encoding: 'utf8',
+      timeout: options.timeout,
+      maxBuffer: 20 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return { code: 0, stdout, stderr: '' }
+  } catch (error) {
+    return {
+      code: typeof error.status === 'number' ? error.status : -1,
+      stdout: String(error.stdout ?? ''),
+      stderr: String(error.stderr ?? error.message ?? ''),
+      signal: error.signal ?? null,
+    }
+  }
+}
+
+export function firstSha(text) {
+  const match = String(text).match(/\b([0-9a-f]{40})\b/)
+  return match?.[1]
+}
+
+/** Ask origin for the current main SHA. The caller supplies an environment that follows the proxy guard. */
+export function remoteMainSha({ run = defaultRun, checkout, remote = 'origin', branch = 'main', env }) {
+  const url = run(['git', '-C', checkout, 'remote', 'get-url', remote], { env, timeout: 30_000 })
+  if (url.code !== 0) throw new Error(`Cannot read ${remote} from ${checkout}: ${tailOf(url.stderr) || `exit ${url.code}`}`)
+  const remoteUrl = url.stdout.trim()
+  const result = run(['git', '-C', checkout, 'ls-remote', '--exit-code', remoteUrl, `refs/heads/${branch}`],
+    { env, timeout: 60_000 })
+  if (result.code !== 0) {
+    throw new Error(`git ls-remote ${remote}/${branch} failed: ${tailOf(result.stderr) || `exit ${result.code}`}`)
+  }
+  const sha = firstSha(result.stdout)
+  if (!sha) throw new Error(`git ls-remote ${remote}/${branch} returned no SHA`)
+  return { sha, url: remoteUrl }
+}
+
+export function tailOf(text, lines = 4) {
+  const rows = String(text ?? '').trim().split(/\r?\n/).filter(Boolean)
+  return rows.slice(-lines).join(' | ').slice(0, 800)
+}
+
+export function fileHash(file) {
+  return createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+}
+
+export function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return undefined }
+}
+
+/** Write a file through a temporary sibling so readers never see a half-written marker. */
+export function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+  const temporary = `${file}.${process.pid}.tmp`
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+  fs.renameSync(temporary, file)
+}
+
+export const buildDirectory = (buildRoot, sha) => path.join(buildRoot, 'builds', sha)
+export const buildMetaFile = (buildRoot, sha) => path.join(buildRoot, 'meta', `${sha}.json`)
+
+export function readBuildMeta(buildRoot, sha) {
+  const meta = readJson(buildMetaFile(buildRoot, sha))
+  return meta?.schema === 'nightly-build/v1' && meta.sha === sha ? meta : undefined
+}
+
+/** The newest successful build this runner produced; its SHA is reported when it is not origin/main. */
+export function lastGoodBuild(buildRoot) {
+  const pointer = readJson(path.join(buildRoot, 'last-good.json'))
+  if (!pointer?.sha) return undefined
+  const meta = readBuildMeta(buildRoot, pointer.sha)
+  const directory = buildDirectory(buildRoot, pointer.sha)
+  if (!meta || !fs.existsSync(path.join(directory, 'index.html'))) return undefined
+  return { ...meta, directory }
+}
+
+/**
+ * Decide which build the run may test. A failed or unreadable remote never becomes `fresh`;
+ * a last good build is usable only as an explicit `stale`/`unknown` observation.
+ */
+export function chooseNightlyBuild({ remote = 'origin', branch = 'main', remoteSha, remoteError, buildResult, lastGood }) {
+  if (remoteSha) {
+    if (buildResult?.status === 'built' || buildResult?.status === 'reused') {
+      return {
+        state: 'fresh',
+        meta: buildResult.meta,
+        chosen: { sha: remoteSha, directory: buildResult.directory, sourceDir: buildResult.meta?.source,
+          source: buildResult.status === 'reused' ? 'reused-build' : 'fresh-build' },
+        reason: null,
+      }
+    }
+    const reason = `远端 ${remote}/${branch} ${remoteSha.slice(0, 12)} 构建失败：${buildResult?.reason ?? 'unknown'}` +
+      (buildResult?.log ? `；日志：${buildResult.log}` : '')
+    if (lastGood) {
+      return {
+        state: 'stale',
+        meta: lastGood,
+        chosen: { sha: lastGood.sha, directory: lastGood.directory, sourceDir: lastGood.source, source: 'last-good' },
+        reason: `${reason}；本次实测旧 build ${lastGood.sha.slice(0, 12)}，不是最新`,
+      }
+    }
+    return { state: 'failed', meta: undefined, chosen: undefined, reason: `${reason}；没有可用的 last good build，本次未测` }
+  }
+  const reason = `无法确认 ${remote}/${branch} 最新 SHA：${remoteError ?? 'unknown error'}`
+  if (lastGood) {
+    return {
+      state: 'unknown',
+      meta: lastGood,
+      chosen: { sha: lastGood.sha, directory: lastGood.directory, sourceDir: lastGood.source, source: 'last-good' },
+      reason: `${reason}；本次实测 build ${lastGood.sha.slice(0, 12)}，无法证明是最新`,
+    }
+  }
+  return { state: 'unknown', meta: undefined, chosen: undefined, reason: `${reason}；没有可用的 build，本次未测` }
+}
+
+/** Keep only the newest successful build outputs so the nightly machine does not grow without bound. */
+export function pruneBuilds(buildRoot, keep = 3) {
+  const builds = path.join(buildRoot, 'builds')
+  let entries
+  try { entries = fs.readdirSync(builds, { withFileTypes: true }) } catch { return [] }
+  const protectedSha = readJson(path.join(buildRoot, 'last-good.json'))?.sha
+  const rows = entries.filter(entry => entry.isDirectory() && SHA.test(entry.name))
+    .map(entry => ({ sha: entry.name, meta: readBuildMeta(buildRoot, entry.name) }))
+    .sort((a, b) => String(b.meta?.builtAt ?? '').localeCompare(String(a.meta?.builtAt ?? '')))
+  const removed = []
+  for (const row of rows.slice(Math.max(0, keep))) {
+    if (row.sha === protectedSha) continue
+    fs.rmSync(path.join(builds, row.sha), { recursive: true, force: true })
+    fs.rmSync(buildMetaFile(buildRoot, row.sha), { force: true })
+    removed.push(row.sha)
+  }
+  return removed
+}
+
+function writeFailure(buildRoot, sha, failure) {
+  const file = path.join(buildRoot, 'failures', `${sha}-${Date.now()}.json`)
+  writeJson(file, { schema: 'nightly-build-failure/v1', sha, at: new Date().toISOString(), ...failure })
+  return file
+}
+
+/**
+ * Check out `sha` in a build-only clone, install `package-lock.json` dependencies and build there.
+ * The read-only observer checkout is only used as a local object source, never modified.
+ */
+export function ensureBuild({ run = defaultRun, checkout, buildRoot, sha, remoteUrl, branch = 'main', env, timeoutMs = 600_000 }) {
+  if (!SHA.test(sha)) return { status: 'failed', reason: `Invalid build SHA: ${sha}` }
+  const started = Date.now()
+  const deadline = started + Math.max(30_000, timeoutMs)
+  const left = () => Math.max(1_000, deadline - Date.now())
+  const logs = []
+  const log = line => { logs.push(line) }
+  const finish = (status, extra = {}) => {
+    const logFile = path.join(buildRoot, 'logs', `${sha}-${started}.log`)
+    fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 })
+    fs.writeFileSync(logFile, `${logs.join('\n')}\n`, { mode: 0o600 })
+    return { status, log: logFile, ...extra }
+  }
+  const fail = (step, result, extra = {}) => {
+    const reason = `${step} ${result?.code === 0 ? 'did not produce a build' : `exited ${result?.code ?? 'unknown'}`}` +
+      (tailOf(result?.stderr) ? `: ${tailOf(result.stderr)}` : '')
+    const failureFile = writeFailure(buildRoot, sha, { step, code: result?.code ?? null,
+      stderr: tailOf(result?.stderr, 20), stdout: tailOf(result?.stdout, 20) })
+    fs.rmSync(buildDirectory(buildRoot, sha), { recursive: true, force: true })
+    log(`${step} failed: ${reason}`)
+    return finish('failed', { sha, reason, failure: failureFile, ...extra })
+  }
+
+  const existing = readBuildMeta(buildRoot, sha)
+  const directory = buildDirectory(buildRoot, sha)
+  if (existing && fs.existsSync(path.join(directory, 'index.html'))) {
+    return { status: 'reused', sha, directory, meta: existing }
+  }
+
+  fs.mkdirSync(buildRoot, { recursive: true, mode: 0o700 })
+  const sourceDir = path.join(buildRoot, 'source')
+  if (!fs.existsSync(path.join(sourceDir, '.git'))) {
+    fs.rmSync(sourceDir, { recursive: true, force: true })
+    const clone = run(['git', 'clone', '--no-checkout', checkout, sourceDir], { env, timeout: Math.min(120_000, left()) })
+    if (clone.code !== 0) return fail('git clone', clone)
+  }
+  const present = run(['git', '-C', sourceDir, 'cat-file', '-e', `${sha}^{commit}`], { env, timeout: 15_000 })
+  if (present.code !== 0) {
+    let fetch = run(['git', '-C', sourceDir, 'fetch', '--depth', '1', remoteUrl, sha], { env, timeout: Math.min(180_000, left()) })
+    if (fetch.code !== 0) {
+      fetch = run(['git', '-C', sourceDir, 'fetch', '--depth', '1', remoteUrl, `refs/heads/${branch}`],
+        { env, timeout: Math.min(180_000, left()) })
+    }
+    if (fetch.code !== 0) return fail('git fetch', fetch)
+  }
+  const checkedOut = run(['git', '-C', sourceDir, 'checkout', '--detach', '--force', sha], { env, timeout: 60_000 })
+  if (checkedOut.code !== 0) return fail('git checkout', checkedOut)
+  const head = run(['git', '-C', sourceDir, 'rev-parse', 'HEAD'], { env, timeout: 30_000 })
+  if (head.code !== 0 || head.stdout.trim() !== sha) {
+    return fail('git checkout', { code: head.code, stderr: `HEAD ${head.stdout.trim() || 'unknown'} != ${sha}` })
+  }
+  // Remove ignored build leftovers and untracked files from earlier checkouts, but keep the installed dependencies.
+  const cleaned = run(['git', '-C', sourceDir, 'clean', '-ffdx', '-e', 'node_modules'], { env, timeout: 60_000 })
+  if (cleaned.code !== 0) return fail('git clean', cleaned)
+
+  const lock = fileHash(path.join(sourceDir, 'package-lock.json'))
+  const depsFile = path.join(buildRoot, 'deps.json')
+  const installed = readJson(depsFile)
+  if (!fs.existsSync(path.join(sourceDir, 'node_modules')) || installed?.lockHash !== lock) {
+    const ci = run(['npm', 'ci', '--no-audit', '--no-fund'], { cwd: sourceDir, env, timeout: Math.min(480_000, left()) })
+    if (ci.code !== 0) return fail('npm ci', ci)
+    writeJson(depsFile, { lockHash: lock, installedAt: new Date().toISOString() })
+  }
+
+  fs.rmSync(directory, { recursive: true, force: true })
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const build = run(['npm', 'run', 'build'], {
+    cwd: sourceDir,
+    env: { ...env, BUILD_PATH: directory },
+    timeout: Math.min(600_000, left()),
+  })
+  if (build.code !== 0 || !fs.existsSync(path.join(directory, 'index.html'))) return fail('npm run build', build)
+
+  const meta = {
+    schema: 'nightly-build/v1',
+    sha,
+    lockHash: lock,
+    builtAt: new Date().toISOString(),
+    directory,
+    source: sourceDir,
+    durationMs: Date.now() - started,
+  }
+  writeJson(buildMetaFile(buildRoot, sha), meta)
+  writeJson(path.join(buildRoot, 'last-good.json'), { schema: 'nightly-build-pointer/v1', sha, builtAt: meta.builtAt, directory })
+  pruneBuilds(buildRoot)
+  return finish('built', { sha, directory, meta })
+}
+
+/**
+ * Prove the preview on the fixed port serves the exact build directory. The static preview
+ * serves build files verbatim, so comparing index.html and its hashed JS bundle is enough.
+ */
+export async function servedBuildMatches({ target, buildDir, fetchImpl = fetch }) {
+  const indexFile = path.join(buildDir, 'index.html')
+  if (!fs.existsSync(indexFile)) return { match: false, reason: `missing ${indexFile}` }
+  let response
+  try { response = await fetchImpl(new URL('/index.html', target)) }
+  catch (error) { return { match: false, reason: `cannot reach ${target}: ${String(error)}` } }
+  if (!response.ok) return { match: false, reason: `index.html answered ${response.status}` }
+  const served = await response.text()
+  const local = fs.readFileSync(indexFile, 'utf8')
+  if (served !== local) return { match: false, reason: 'served index.html differs from the build' }
+  const asset = /src="(\/static\/[^"]+\.js)"/.exec(local)?.[1]
+  if (!asset) return { match: true }
+  let bundle
+  try { bundle = await fetchImpl(new URL(asset, target)) }
+  catch (error) { return { match: false, reason: `cannot fetch ${asset}: ${String(error)}` } }
+  if (!bundle.ok) return { match: false, reason: `${asset} answered ${bundle.status}` }
+  const bytes = Buffer.from(await bundle.arrayBuffer())
+  const expected = fs.readFileSync(path.join(buildDir, asset.replace(/^\//, '')))
+  return bytes.equals(expected) ? { match: true } : { match: false, reason: `served ${asset} differs from the build` }
+}

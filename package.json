@@ -28,7 +28,8 @@
     "prompts",
     "skills",
     "integrations",
-    "scripts/fretsense-user-sim.mjs"
+    "scripts/fretsense-user-sim.mjs",
+    "scripts/fretsense-nightly-build.mjs"
   ],
   "dsh": {
     "bundle": {
