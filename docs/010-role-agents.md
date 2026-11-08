@@ -20,13 +20,26 @@ The observer preset has no shell, jobs, write/edit tools, subagents, web tools, 
 
 The example instance runs at 02:30 Asia/Tokyo. The Trigger id is derived from `role + slot`, so a restart does not run the same slot twice. If the machine was asleep, the latest slot may run once inside a six-hour catch-up window; outside it the Source records `missed`.
 
+The 02:15 `local.javeyli.magpie-preflight` LaunchAgent still opens the local model app before the run. The schedule Source, RoleSpec fields and `role-run/v1` entry protocol are unchanged.
+
 The fixed runner:
 
+- asks `origin` for the current `refs/heads/main` SHA before doing anything else, using the macOS system proxy (`scutil`) as the single proxy port and never a second shell-proxy layer;
+- builds that exact SHA in an independent build root (`<artifactRoot>/<role>`, outputs under `builds/<sha>`), not in the read-only checkout and not in its `build/`;
+- checks out the explicit SHA, installs `package-lock.json` dependencies with `npm ci`, builds with `npm run build`, then writes a per-file `build-manifest.json` and a `nightly-build/v1` marker containing the build SHA and tree hash;
+- re-verifies the manifest and tree hash before reusing a cached build; a missing field, replaced `index.html`/asset or traversing `last-good` SHA is a cache miss, not a fresh build;
 - opens the local FretSense preview at `http://127.0.0.1:4173`;
+- proves the preview serves the exact build by comparing `index.html` and every manifest JS/CSS entrypoint before opening a single path; a build without a verifiable JS entrypoint cannot match;
+- replaces a preview only when its owner record matches this build root, source directory, script path and PID; a foreign process, even with the same script name, makes the run skip and report the conflict without being killed;
 - runs cold start, Home, Notes, Intervals, Scales, Chords and Me at 1440x900;
 - records console errors, page errors, failed requests, screenshots and horizontal overflow in `run.json`;
+- records both `freshness.remoteSha` and `freshness.buildSha`, and sets `target.commit` to the build SHA actually tested;
 - records `git status --porcelain` before and after and aborts if the checkout changed;
 - writes only under the role artifact root, never into the product checkout.
+
+When the build for the new SHA fails, the runner reports `freshness.state=failed` with the real command exit and stderr tail, and leaves `last-good.json` untouched. If a last good build exists it may still run, but the run is `freshness.state=stale` and `target.build=stale`; the Issue body adds a “未测最新” line with both SHAs. There is no silent fallback to the old build. If `origin/main` cannot be read, the resulting SHA is unknown and the run is `freshness.state=unknown`, never `fresh`.
+
+The run contract also rejects non-40-hex SHAs, a `target.build` that contradicts the freshness state, and a run whose seven fixed paths were all skipped. A real legacy run without `freshness` remains readable; its tool facts omit the `freshness` key instead of emitting `undefined`.
 
 The observer may publish at most one aggregate Issue. The publication tool, not the model, renders the `<!-- whoSaid: ai-record -->` marker, coverage, evidence and the explicit “real microphone / guitar / audio accuracy was not tested” boundary. It refuses duplicate fingerprints (area, title and repro) and more than three findings.
 

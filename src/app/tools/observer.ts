@@ -5,7 +5,7 @@ import { z } from 'zod'
 import type { Ticket } from '../../core/index.ts'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { Store } from '../store.ts'
-import { PublishSchema, RoleRunSchema, publishRoleIssue, roleForTicket, runRoleSimulation } from '../role-run.ts'
+import { PublishSchema, RoleRunSchema, publishRoleIssue, roleForTicket, roleRunFacts, runRoleSimulation } from '../role-run.ts'
 import { tool, type Tool } from './tool.ts'
 
 export interface ObserverToolsHost {
@@ -25,22 +25,11 @@ export function observerTools(host: ObserverToolsHost, ticket: Ticket): Tool[] {
   return [
     tool({
       name: 'fretsense_user_sim_run',
-      description: 'Run the fixed FretSense seven-path desktop check once for this scheduled role, write run artifacts outside the read-only checkout, and return the run facts. This tool starts a local preview if needed; it never edits the checkout.',
+      description: 'Run the fixed FretSense seven-path desktop check once for this scheduled role, write run artifacts outside the read-only checkout, and return the run facts. It checks origin/main, builds that exact SHA in an independent build root when needed, and reports the remote and build SHAs under freshness. This tool starts or verifies the local preview; it never edits the checkout.',
       schema: z.object({}).strict(),
       execute: async (_args, signal) => {
         const { run, directory } = await prepare(signal)
-        return {
-          schema: run.schema,
-          run_id: run.runId,
-          run_directory: directory,
-          target: run.target,
-          git: run.git,
-          steps: run.steps.map(step => ({ id: step.id, status: step.status, duration_ms: step.durationMs,
-            screenshot: step.screenshot ? join(directory, step.screenshot) : undefined, reason: step.reason,
-            console_errors: step.consoleErrors, page_errors: step.pageErrors, failed_requests: step.failedRequests })),
-          count: { steps: run.steps.length, failed: run.steps.filter(step => step.status === 'fail').length,
-            skipped: run.steps.filter(step => step.status === 'skip').length },
-        }
+        return roleRunFacts(run, directory)
       },
     }),
     tool({
