@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { assertRunFreshness, assertRunTested, PublishSchema, issueFingerprint, publishRoleIssue, roleIssueBody,
-  type RoleRun } from '../src/app/role-run.ts'
+  roleRunFacts, type RoleRun } from '../src/app/role-run.ts'
 import { RoleSpecSchema } from '../src/roles.ts'
 import { buildEnv, chooseNightlyBuild, ensureBuild, firstSha, lastGoodBuild, networkEnv, parseScutilProxy, pruneBuilds,
   remoteMainSha, servedBuildMatches, writeJson, type CommandResult, type CommandRun } from '../scripts/fretsense-nightly-build.mjs'
@@ -317,6 +317,17 @@ describe('run freshness contract', () => {
     expect(() => assertRunFreshness(freshnessRun(buildFreshness('fresh', latestSha)))).not.toThrow()
   })
 
+  it('requires non-empty, recorded remote and build SHAs for a fresh claim', () => {
+    const empty = freshnessRun({ ...buildFreshness('fresh', ''), remoteSha: '' }, '')
+    expect(() => assertRunFreshness(empty)).toThrow('without both remote and build SHAs')
+    const noRemoteRecord = freshnessRun({ ...buildFreshness('fresh', latestSha), remote: undefined })
+    expect(() => assertRunFreshness(noRemoteRecord)).toThrow('remote record does not match remoteSha')
+    const noBuildRecord = freshnessRun({ ...buildFreshness('fresh', latestSha), build: null })
+    expect(() => assertRunFreshness(noBuildRecord)).toThrow('build record does not match buildSha')
+    const noTarget = freshnessRun(buildFreshness('fresh', latestSha), '')
+    expect(() => assertRunFreshness(noTarget)).toThrow('target commit differs')
+  })
+
   it('rejects a fresh claim or target commit that contradicts the build SHA', () => {
     expect(() => assertRunFreshness(freshnessRun(buildFreshness('fresh', oldSha)))).toThrow('differs from origin')
     expect(() => assertRunFreshness(freshnessRun(buildFreshness('fresh', latestSha), oldSha))).toThrow('target commit differs')
@@ -358,6 +369,47 @@ describe('run freshness contract', () => {
     expect(failed).toContain(`origin/main\`：\`${latestSha}`)
     expect(failed).toContain('本次实测 build：`unknown`')
     expect(failed).toContain('**未测最新**（failed）')
+  })
+})
+
+function expectLossless(value: unknown): void {
+  if (value === null || value === undefined) return
+  if (Array.isArray(value)) { for (const item of value) expectLossless(item); return }
+  if (typeof value !== 'object') return
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    expect(item, key).not.toBeUndefined()
+    expectLossless(item)
+  }
+}
+
+describe('observer tool facts', () => {
+  it('omits absent optional fields for a legacy run instead of emitting undefined', () => {
+    const legacy: RoleRun = {
+      schema: 'role-run/v1',
+      runId: '2026-11-09T02:30:00+09:00',
+      startedAt: '2026-11-08T17:30:00.000Z',
+      finishedAt: '2026-11-08T17:35:00.000Z',
+      target: { url: 'http://127.0.0.1:4173', commit: '', build: 'missing' },
+      viewports: [],
+      steps: [{ id: 'cold-start', status: 'pass', consoleErrors: [], pageErrors: [], failedRequests: [] }],
+      limits: {},
+    }
+    const facts = roleRunFacts(legacy, '/tmp/run')
+    expect(Object.hasOwn(facts, 'freshness')).toBe(false)
+    expect(Object.hasOwn(facts, 'git')).toBe(false)
+    expect(Object.hasOwn(facts.steps[0]!, 'duration_ms')).toBe(false)
+    expect(Object.hasOwn(facts.steps[0]!, 'screenshot')).toBe(false)
+    expect(Object.hasOwn(facts.steps[0]!, 'reason')).toBe(false)
+    expectLossless(facts)
+    expect(JSON.parse(JSON.stringify(facts))).toEqual(facts)
+  })
+
+  it('includes freshness only when a run has it, and stays lossless JSON', () => {
+    const facts = roleRunFacts(freshnessRun(buildFreshness('fresh', latestSha)), '/tmp/run')
+    expect(Object.hasOwn(facts, 'freshness')).toBe(true)
+    expect(facts.freshness).toMatchObject({ state: 'fresh', remoteSha: latestSha, buildSha: latestSha })
+    expectLossless(facts)
+    expect(JSON.parse(JSON.stringify(facts))).toEqual(facts)
   })
 })
 

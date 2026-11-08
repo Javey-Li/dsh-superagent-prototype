@@ -53,11 +53,24 @@ export type RunFreshness = z.infer<typeof FreshnessSchema>
 export function assertRunFreshness(run: RoleRun): void {
   const freshness = run.freshness
   if (!freshness) return
-  if (run.target.commit && freshness.buildSha && run.target.commit !== freshness.buildSha) {
+  if (freshness.state === 'fresh') {
+    if (!freshness.remoteSha || !freshness.buildSha) {
+      throw new Error('run.json claims a fresh build without both remote and build SHAs')
+    }
+    if (freshness.remote?.sha !== freshness.remoteSha) {
+      throw new Error('run.json freshness remote record does not match remoteSha')
+    }
+    if (freshness.build?.sha !== freshness.buildSha) {
+      throw new Error('run.json freshness build record does not match buildSha')
+    }
+    if (freshness.buildSha !== freshness.remoteSha) {
+      throw new Error('run.json claims a fresh build while the build SHA differs from origin')
+    }
+    if (run.target.commit !== freshness.buildSha) {
+      throw new Error('run.json target commit differs from the build SHA')
+    }
+  } else if (run.target.commit && freshness.buildSha && run.target.commit !== freshness.buildSha) {
     throw new Error('run.json target commit differs from the build SHA')
-  }
-  if (freshness.state === 'fresh' && freshness.remoteSha && freshness.buildSha !== freshness.remoteSha) {
-    throw new Error('run.json claims a fresh build while the build SHA differs from origin')
   }
   if (freshness.state === 'stale' && freshness.remoteSha && freshness.buildSha === freshness.remoteSha) {
     throw new Error('run.json marks a current build as stale')
@@ -69,6 +82,33 @@ export function assertRunTested(run: RoleRun): void {
   const freshness = run.freshness
   if (!freshness || freshness.state === 'fresh' || freshness.buildSha) return
   throw new Error(`The nightly runner did not test a build: ${freshness.reason ?? freshness.state}`)
+}
+
+/** Observer tool facts must stay lossless JSON: omit optional keys instead of emitting `undefined`. */
+export function roleRunFacts(run: RoleRun, directory: string) {
+  return {
+    schema: run.schema,
+    run_id: run.runId,
+    run_directory: directory,
+    target: run.target,
+    ...(run.freshness ? { freshness: run.freshness } : {}),
+    ...(run.git ? { git: run.git } : {}),
+    steps: run.steps.map(step => ({
+      id: step.id,
+      status: step.status,
+      ...(step.durationMs !== undefined ? { duration_ms: step.durationMs } : {}),
+      ...(step.screenshot ? { screenshot: join(directory, step.screenshot) } : {}),
+      ...(step.reason !== undefined ? { reason: step.reason } : {}),
+      console_errors: step.consoleErrors,
+      page_errors: step.pageErrors,
+      failed_requests: step.failedRequests,
+    })),
+    count: {
+      steps: run.steps.length,
+      failed: run.steps.filter(step => step.status === 'fail').length,
+      skipped: run.steps.filter(step => step.status === 'skip').length,
+    },
+  }
 }
 
 export const FindingSchema = z.object({
