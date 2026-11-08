@@ -129,6 +129,7 @@ function inside(parent, child) {
 }
 
 function samePath(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) return false
   try { return fs.realpathSync(a) === fs.realpathSync(b) } catch { return path.resolve(a) === path.resolve(b) }
 }
 
@@ -488,8 +489,13 @@ export function clearPreviewOwner(buildRoot, pid) {
 export function trustedPreviewOwner({ owner, buildRoot, sourceDir, port, listeningPids = [], commandOf = () => '',
   cwdOf = () => '' }) {
   const expectedScript = path.join(sourceDir, 'tools', 'serve_static_preview.mjs')
-  const trusted = owner?.schema === 'nightly-preview-owner/v1'
+  const trusted = owner && typeof owner === 'object'
+    && owner.schema === 'nightly-preview-owner/v1'
     && Number.isInteger(owner.pid) && owner.pid > 0
+    && (typeof owner.port === 'string' || typeof owner.port === 'number')
+    && typeof owner.buildRoot === 'string' && owner.buildRoot.length > 0
+    && typeof owner.cwd === 'string' && owner.cwd.length > 0
+    && typeof owner.script === 'string' && owner.script.length > 0
     && String(owner.port) === String(port)
     && samePath(owner.buildRoot, buildRoot)
     && samePath(owner.cwd, sourceDir)

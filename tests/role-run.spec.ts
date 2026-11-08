@@ -394,6 +394,13 @@ describe('preview ownership', () => {
     expect(trustedPreviewOwner({ owner, buildRoot, sourceDir, port: '4173', listeningPids: [456], commandOf,
       cwdOf }).ownedPid).toBeUndefined()
   })
+
+  it('treats a truncated owner record as untrusted instead of throwing', () => {
+    const result = trustedPreviewOwner({ owner: { schema: 'nightly-preview-owner/v1', pid: 123, port: '4173' },
+      buildRoot, sourceDir, port: '4173', listeningPids: [123], commandOf, cwdOf })
+    expect(result.ownedPid).toBeUndefined()
+    expect(result.foreign).toHaveLength(1)
+  })
 })
 
 type Freshness = NonNullable<RoleRun['freshness']>

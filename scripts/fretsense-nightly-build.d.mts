@@ -82,7 +82,7 @@ export interface PreviewOwner {
 }
 export declare function writePreviewOwner(buildRoot: string, owner: Omit<PreviewOwner, 'schema'>): void
 export declare function clearPreviewOwner(buildRoot: string, pid: number): void
-export declare function trustedPreviewOwner(input: { owner?: PreviewOwner; buildRoot: string; sourceDir: string;
+export declare function trustedPreviewOwner(input: { owner?: Partial<PreviewOwner>; buildRoot: string; sourceDir: string;
   port: string | number; listeningPids?: number[]; commandOf?: (pid: number) => string;
   cwdOf?: (pid: number) => string }): { ownedPid?: number;
   foreign: { pid: number; command: string; cwd: string }[] }
