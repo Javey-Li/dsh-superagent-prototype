@@ -46,6 +46,10 @@ export const RoleRunSchema = z.object({
 export type RoleRun = z.infer<typeof RoleRunSchema>
 export type RunFreshness = z.infer<typeof FreshnessSchema>
 
+const SHA = /^[0-9a-f]{40}$/
+const STEP_IDS = ['cold-start', 'home', 'note', 'interval', 'scale', 'changes', 'persona'] as const
+const isSha = (value: unknown): value is string => typeof value === 'string' && SHA.test(value)
+
 /**
  * A run must never claim freshness it did not prove. The runner records the remote main SHA and
  * the build SHA independently; this rejects a fresh label or target commit that contradicts them.
@@ -53,8 +57,18 @@ export type RunFreshness = z.infer<typeof FreshnessSchema>
 export function assertRunFreshness(run: RoleRun): void {
   const freshness = run.freshness
   if (!freshness) return
+  if (freshness.remoteSha && !isSha(freshness.remoteSha)) throw new Error('run.json remote SHA is not 40-hex')
+  if (freshness.buildSha && !isSha(freshness.buildSha)) throw new Error('run.json build SHA is not 40-hex')
+  if (freshness.remote?.sha && !isSha(freshness.remote.sha)) throw new Error('run.json recorded remote SHA is not 40-hex')
+  if (freshness.build?.sha && !isSha(freshness.build.sha)) throw new Error('run.json recorded build SHA is not 40-hex')
+  if (freshness.remoteSha && freshness.remote?.sha && freshness.remote.sha !== freshness.remoteSha) {
+    throw new Error('run.json freshness remote record does not match remoteSha')
+  }
+  if (freshness.buildSha && freshness.build?.sha && freshness.build.sha !== freshness.buildSha) {
+    throw new Error('run.json freshness build record does not match buildSha')
+  }
   if (freshness.state === 'fresh') {
-    if (!freshness.remoteSha || !freshness.buildSha) {
+    if (!isSha(freshness.remoteSha) || !isSha(freshness.buildSha)) {
       throw new Error('run.json claims a fresh build without both remote and build SHAs')
     }
     if (freshness.remote?.sha !== freshness.remoteSha) {
@@ -69,8 +83,22 @@ export function assertRunFreshness(run: RoleRun): void {
     if (run.target.commit !== freshness.buildSha) {
       throw new Error('run.json target commit differs from the build SHA')
     }
-  } else if (run.target.commit && freshness.buildSha && run.target.commit !== freshness.buildSha) {
-    throw new Error('run.json target commit differs from the build SHA')
+    if (run.target.build !== 'production') throw new Error('run.json fresh state requires target.build=production')
+  } else {
+    if (freshness.state === 'failed' && freshness.buildSha) {
+      throw new Error('run.json failed state cannot carry a build SHA')
+    }
+    if (freshness.buildSha) {
+      if (freshness.build?.sha !== freshness.buildSha) {
+        throw new Error('run.json freshness build record does not match buildSha')
+      }
+      if (run.target.commit !== freshness.buildSha) {
+        throw new Error('run.json target commit differs from the build SHA')
+      }
+    }
+    const expected = freshness.state === 'stale' ? 'stale'
+      : freshness.state === 'unknown' && freshness.buildSha ? 'unverified' : 'missing'
+    if (run.target.build !== expected) throw new Error(`run.json ${freshness.state} state requires target.build=${expected}`)
   }
   if (freshness.state === 'stale' && freshness.remoteSha && freshness.buildSha === freshness.remoteSha) {
     throw new Error('run.json marks a current build as stale')
@@ -80,8 +108,17 @@ export function assertRunFreshness(run: RoleRun): void {
 /** A failed or unverified nightly build with no build SHA must not be reported as a completed observation. */
 export function assertRunTested(run: RoleRun): void {
   const freshness = run.freshness
-  if (!freshness || freshness.state === 'fresh' || freshness.buildSha) return
-  throw new Error(`The nightly runner did not test a build: ${freshness.reason ?? freshness.state}`)
+  if (!freshness) return
+  if (freshness.state !== 'fresh' && !freshness.buildSha) {
+    throw new Error(`The nightly runner did not test a build: ${freshness.reason ?? freshness.state}`)
+  }
+  const ids = new Set(run.steps.map(step => step.id))
+  if (run.steps.length !== STEP_IDS.length || ids.size !== STEP_IDS.length || STEP_IDS.some(id => !ids.has(id))) {
+    throw new Error(`The nightly runner did not execute the fixed seven paths (${run.steps.length} step(s))`)
+  }
+  if (run.steps.every(step => step.status === 'skip')) {
+    throw new Error('The nightly runner did not execute any path')
+  }
 }
 
 /** Observer tool facts must stay lossless JSON: omit optional keys instead of emitting `undefined`. */

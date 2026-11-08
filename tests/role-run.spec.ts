@@ -6,8 +6,9 @@ import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { assertRunFreshness, assertRunTested, PublishSchema, issueFingerprint, publishRoleIssue, roleIssueBody,
   roleRunFacts, type RoleRun } from '../src/app/role-run.ts'
 import { RoleSpecSchema } from '../src/roles.ts'
-import { buildEnv, chooseNightlyBuild, ensureBuild, firstSha, lastGoodBuild, networkEnv, parseScutilProxy, pruneBuilds,
-  remoteMainSha, servedBuildMatches, writeJson, type CommandResult, type CommandRun } from '../scripts/fretsense-nightly-build.mjs'
+import { buildDirectory, buildEnv, chooseNightlyBuild, createBuildManifest, ensureBuild, firstSha, lastGoodBuild,
+  networkEnv, parseScutilProxy, pruneBuilds, remoteMainSha, servedBuildMatches, trustedPreviewOwner,
+  verifyBuildArtifact, writeJson, type CommandResult, type CommandRun } from '../scripts/fretsense-nightly-build.mjs'
 
 const dirs: string[] = []
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
@@ -164,7 +165,8 @@ describe('remote main SHA', () => {
   })
 })
 
-function buildCommand(options: { buildCode?: number; stderr?: string } = {}) {
+function buildCommand(options: { sha?: string; buildCode?: number; stderr?: string; css?: string } = {}) {
+  const builtSha = options.sha ?? latestSha
   const calls: string[][] = []
   const command = ((argv: string[], callOptions?: { cwd?: string; env?: NodeJS.ProcessEnv }) => {
     calls.push(argv)
@@ -177,7 +179,7 @@ function buildCommand(options: { buildCode?: number; stderr?: string } = {}) {
     }
     if (joined.includes('cat-file')) return ok()
     if (joined.includes('checkout --detach')) return ok()
-    if (joined.includes('rev-parse HEAD')) return ok(`${latestSha}\n`)
+    if (joined.includes('rev-parse HEAD')) return ok(`${builtSha}\n`)
     if (joined === 'npm ci --no-audit --no-fund') {
       mkdirSync(join(callOptions!.cwd!, 'node_modules'), { recursive: true })
       return ok()
@@ -186,8 +188,15 @@ function buildCommand(options: { buildCode?: number; stderr?: string } = {}) {
       if (options.buildCode) return { code: options.buildCode, stdout: '', stderr: options.stderr ?? 'build failed' }
       const output = callOptions!.env!.BUILD_PATH!
       mkdirSync(join(output, 'static', 'js'), { recursive: true })
-      writeFileSync(join(output, 'index.html'), '<script src="/static/js/main.abc.js"></script>')
+      mkdirSync(join(output, 'static', 'css'), { recursive: true })
+      writeFileSync(join(output, 'index.html'),
+        '<!doctype html><html><head><link rel="stylesheet" href="/static/css/main.abc.css"></head>' +
+        '<body><div id="root"></div><script src="/static/js/main.abc.js"></script></body></html>')
       writeFileSync(join(output, 'static', 'js', 'main.abc.js'), 'console.log(1)')
+      writeFileSync(join(output, 'static', 'css', 'main.abc.css'), options.css ?? 'body{color:#111}')
+      writeFileSync(join(output, 'asset-manifest.json'), JSON.stringify({ files: {
+        'main.js': 'static/js/main.abc.js', 'main.css': 'static/css/main.abc.css',
+      }, entrypoints: ['static/js/main.abc.js', 'static/css/main.abc.css'] }))
       return ok()
     }
     return ok()
@@ -225,12 +234,9 @@ describe('independent build root', () => {
 
   it('reports a real build failure and does not overwrite the last good build', () => {
     const root = temp()
-    mkdirSync(join(root, 'builds', oldSha), { recursive: true })
-    writeFileSync(join(root, 'builds', oldSha, 'index.html'), 'old')
-    writeJson(join(root, 'meta', `${oldSha}.json`), { schema: 'nightly-build/v1', sha: oldSha, lockHash: 'old',
-      builtAt: '2026-11-08T00:00:00.000Z', directory: join(root, 'builds', oldSha), source: join(root, 'source') })
-    writeJson(join(root, 'last-good.json'), { schema: 'nightly-build-pointer/v1', sha: oldSha,
-      builtAt: '2026-11-08T00:00:00.000Z', directory: join(root, 'builds', oldSha) })
+    const old = buildCommand({ sha: oldSha })
+    expect(ensureBuild({ run: old.command, checkout: '/tmp/read-only-checkout', buildRoot: root, sha: oldSha,
+      remoteUrl: 'https://example/repo.git', env: { PATH: '/bin' } }).status).toBe('built')
     const { command } = buildCommand({ buildCode: 1, stderr: 'Module not found: ./missing.js' })
     const result = ensureBuild({ run: command, checkout: '/tmp/read-only-checkout', buildRoot: root, sha: latestSha,
       remoteUrl: 'https://example/repo.git', env: { PATH: '/bin' } })
@@ -240,6 +246,34 @@ describe('independent build root', () => {
     expect(result.failure).toBeTruthy()
     expect(lastGoodBuild(root)?.sha).toBe(oldSha)
     expect(() => readFileSync(join(root, 'builds', latestSha, 'index.html'))).toThrow()
+  })
+
+  it('does not trust an incomplete marker or a replaced build tree', () => {
+    const root = temp()
+    const first = buildCommand()
+    expect(ensureBuild({ run: first.command, checkout: '/tmp/read-only-checkout', buildRoot: root, sha: latestSha,
+      remoteUrl: 'https://example/repo.git', env: { PATH: '/bin' } }).status).toBe('built')
+    writeJson(join(root, 'meta', `${latestSha}.json`), { schema: 'nightly-build/v1', sha: latestSha })
+    const incomplete = buildCommand()
+    expect(ensureBuild({ run: incomplete.command, checkout: '/tmp/read-only-checkout', buildRoot: root, sha: latestSha,
+      remoteUrl: 'https://example/repo.git', env: { PATH: '/bin' } }).status).toBe('built')
+    expect(incomplete.calls.some(argv => argv.join(' ') === 'npm run build')).toBe(true)
+
+    writeFileSync(join(root, 'builds', latestSha, 'index.html'), 'tampered')
+    const replaced = buildCommand()
+    expect(ensureBuild({ run: replaced.command, checkout: '/tmp/read-only-checkout', buildRoot: root, sha: latestSha,
+      remoteUrl: 'https://example/repo.git', env: { PATH: '/bin' } }).status).toBe('built')
+    expect(replaced.calls.some(argv => argv.join(' ') === 'npm run build')).toBe(true)
+    expect(verifyBuildArtifact(root, latestSha).ok).toBe(true)
+  })
+
+  it('refuses a traversing last-good SHA instead of resolving outside the build root', () => {
+    const root = temp()
+    const outside = temp()
+    writeFileSync(join(outside, 'index.html'), '<script src="/static/js/x.js"></script>')
+    writeJson(join(root, 'last-good.json'), { sha: '../../outside' })
+    expect(lastGoodBuild(root)).toBeUndefined()
+    expect(() => buildDirectory(root, '../../outside')).toThrow('Invalid build SHA')
   })
 
   it('keeps three recent builds and never prunes the last good pointer', () => {
@@ -257,11 +291,19 @@ describe('independent build root', () => {
 })
 
 describe('served build proof', () => {
-  const buildDir = () => {
-    const dir = temp()
+  const index = '<!doctype html><html><head><link rel="stylesheet" href="/static/css/main.abc.css"></head>' +
+    '<body><div id="root"></div><script src="/static/js/main.abc.js"></script></body></html>'
+  const buildDir = (css = 'body{color:#111}') => {
+    const root = temp()
+    const dir = join(root, 'builds', latestSha)
     mkdirSync(join(dir, 'static', 'js'), { recursive: true })
-    writeFileSync(join(dir, 'index.html'), '<script src="/static/js/main.abc.js"></script>')
+    mkdirSync(join(dir, 'static', 'css'), { recursive: true })
+    writeFileSync(join(dir, 'index.html'), index)
     writeFileSync(join(dir, 'static', 'js', 'main.abc.js'), 'console.log(1)')
+    writeFileSync(join(dir, 'static', 'css', 'main.abc.css'), css)
+    writeFileSync(join(dir, 'asset-manifest.json'), JSON.stringify({ entrypoints: [
+      'static/js/main.abc.js', 'static/css/main.abc.css'] }))
+    createBuildManifest(root, latestSha, dir)
     return dir
   }
   const reply = (body: string | Uint8Array) => ({
@@ -270,30 +312,87 @@ describe('served build proof', () => {
     text: async () => typeof body === 'string' ? body : Buffer.from(body).toString('utf8'),
     arrayBuffer: async () => typeof body === 'string' ? Buffer.from(body) : body,
   })
+  const serve = (files: Record<string, string>) => (async (input: URL) => {
+    const body = files[input.pathname.replace(/^\//, '')]
+    if (body === undefined) {
+      return { ok: false, status: 404, text: async () => '', arrayBuffer: async () => Buffer.alloc(0) }
+    }
+    return reply(body)
+  }) as unknown as typeof fetch
 
-  it('accepts a server that serves the exact index and hashed bundle', async () => {
+  it('accepts a server that serves the exact index, JS and CSS entrypoints', async () => {
     const dir = buildDir()
-    const fetchImpl = (async (input: URL) => input.pathname.endsWith('.js') ? reply('console.log(1)')
-      : reply('<script src="/static/js/main.abc.js"></script>')) as unknown as typeof fetch
-    await expect(servedBuildMatches({ target: 'http://127.0.0.1:4173', buildDir: dir, fetchImpl }))
-      .resolves.toEqual({ match: true })
+    await expect(servedBuildMatches({ target: 'http://127.0.0.1:4173', buildDir: dir, sha: latestSha,
+      fetchImpl: serve({ 'index.html': index, 'static/js/main.abc.js': 'console.log(1)',
+        'static/css/main.abc.css': 'body{color:#111}' }) })).resolves.toMatchObject({ match: true })
   })
 
   it('rejects a server that still serves another build', async () => {
     const dir = buildDir()
-    const fetchImpl = (async () => reply('<script src="/static/js/main.old.js"></script>')) as unknown as typeof fetch
-    const result = await servedBuildMatches({ target: 'http://127.0.0.1:4173', buildDir: dir, fetchImpl })
+    const result = await servedBuildMatches({ target: 'http://127.0.0.1:4173', buildDir: dir, sha: latestSha,
+      fetchImpl: serve({ 'index.html': '<script src="/static/js/main.old.js"></script>' }) })
     expect(result.match).toBe(false)
     expect(result.reason).toContain('index.html differs')
   })
 
-  it('rejects a matching index whose bundle differs', async () => {
+  it('rejects a matching index and JS whose CSS differs', async () => {
     const dir = buildDir()
-    const fetchImpl = (async (input: URL) => input.pathname.endsWith('.js') ? reply('console.log(2)')
-      : reply('<script src="/static/js/main.abc.js"></script>')) as unknown as typeof fetch
-    const result = await servedBuildMatches({ target: 'http://127.0.0.1:4173', buildDir: dir, fetchImpl })
+    const result = await servedBuildMatches({ target: 'http://127.0.0.1:4173', buildDir: dir, sha: latestSha,
+      fetchImpl: serve({ 'index.html': index, 'static/js/main.abc.js': 'console.log(1)',
+        'static/css/main.abc.css': 'body{color:red}' }) })
     expect(result.match).toBe(false)
-    expect(result.reason).toContain('main.abc.js differs')
+    expect(result.reason).toContain('main.abc.css differs')
+  })
+
+  it('rejects a manifest without a JS entrypoint or with a missing entry file', async () => {
+    const root = temp()
+    const dir = join(root, 'builds', latestSha)
+    mkdirSync(join(dir, 'static', 'css'), { recursive: true })
+    writeFileSync(join(dir, 'index.html'), index)
+    writeFileSync(join(dir, 'static', 'css', 'main.abc.css'), 'body{color:#111}')
+    writeJson(join(dir, 'build-manifest.json'), { schema: 'nightly-build-manifest/v1', sha: latestSha,
+      files: [], entrypoints: ['index.html', 'static/css/main.abc.css'], treeHash: 'x', fileCount: 2, createdAt: '' })
+    await expect(servedBuildMatches({ target: 'http://127.0.0.1:4173', buildDir: dir, sha: latestSha,
+      fetchImpl: serve({ 'index.html': index, 'static/css/main.abc.css': 'body{color:#111}' }) }))
+      .resolves.toMatchObject({ match: false, reason: expect.stringContaining('no JS entrypoint') })
+    writeJson(join(dir, 'build-manifest.json'), { schema: 'nightly-build-manifest/v1', sha: latestSha,
+      files: [], entrypoints: ['index.html', 'static/js/missing.js'], treeHash: 'x', fileCount: 2, createdAt: '' })
+    await expect(servedBuildMatches({ target: 'http://127.0.0.1:4173', buildDir: dir, sha: latestSha,
+      fetchImpl: serve({ 'index.html': index }) }))
+      .resolves.toMatchObject({ match: false, reason: expect.stringContaining('missing static/js/missing.js') })
+  })
+})
+
+describe('preview ownership', () => {
+  const buildRoot = '/tmp/nightly-build-root'
+  const sourceDir = join(buildRoot, 'source')
+  const script = join(sourceDir, 'tools', 'serve_static_preview.mjs')
+  const owner = { schema: 'nightly-preview-owner/v1' as const, pid: 123, port: '4173', buildRoot,
+    cwd: sourceDir, script }
+  const commandOf = (pid: number) => pid === 123 ? `node ${script}` : `node /tmp/other/tools/serve_static_preview.mjs`
+  const cwdOf = (pid: number) => pid === 123 ? sourceDir : '/tmp/other'
+
+  it('trusts only the recorded pid with matching build root, cwd and script path', () => {
+    expect(trustedPreviewOwner({ owner, buildRoot, sourceDir, port: '4173', listeningPids: [123], commandOf, cwdOf }))
+      .toEqual({ ownedPid: 123, foreign: [] })
+  })
+
+  it('leaves a foreign same-named preview alive and reports it as foreign', () => {
+    const result = trustedPreviewOwner({ buildRoot, sourceDir, port: '4173', listeningPids: [999], commandOf, cwdOf })
+    expect(result.ownedPid).toBeUndefined()
+    expect(result.foreign).toEqual([{ pid: 999, command: 'node /tmp/other/tools/serve_static_preview.mjs',
+      cwd: '/tmp/other' }])
+  })
+
+  it('rejects a record whose cwd, script, build root or pid does not match', () => {
+    expect(trustedPreviewOwner({ owner: { ...owner, cwd: '/tmp/other' }, buildRoot, sourceDir, port: '4173',
+      listeningPids: [123], commandOf, cwdOf }).ownedPid).toBeUndefined()
+    expect(trustedPreviewOwner({ owner: { ...owner, script: '/tmp/other/tools/serve_static_preview.mjs' }, buildRoot,
+      sourceDir, port: '4173', listeningPids: [123], commandOf, cwdOf }).ownedPid).toBeUndefined()
+    expect(trustedPreviewOwner({ owner: { ...owner, buildRoot: '/tmp/other-root' }, buildRoot, sourceDir, port: '4173',
+      listeningPids: [123], commandOf, cwdOf }).ownedPid).toBeUndefined()
+    expect(trustedPreviewOwner({ owner, buildRoot, sourceDir, port: '4173', listeningPids: [456], commandOf,
+      cwdOf }).ownedPid).toBeUndefined()
   })
 })
 
@@ -309,7 +408,11 @@ const buildFreshness = (state: Freshness['state'], buildSha: string, reason?: st
   reason: reason ?? null,
 })
 function freshnessRun(value: Freshness | undefined, commit = value?.buildSha ?? ''): RoleRun {
-  return { ...run, target: { ...run.target, commit }, freshness: value }
+  const build = !value ? run.target.build
+    : value.state === 'fresh' ? 'production'
+      : value.state === 'stale' ? 'stale'
+        : value.state === 'unknown' && value.buildSha ? 'unverified' : 'missing'
+  return { ...run, target: { ...run.target, commit, build }, freshness: value }
 }
 
 describe('run freshness contract', () => {
@@ -326,6 +429,21 @@ describe('run freshness contract', () => {
     expect(() => assertRunFreshness(noBuildRecord)).toThrow('build record does not match buildSha')
     const noTarget = freshnessRun(buildFreshness('fresh', latestSha), '')
     expect(() => assertRunFreshness(noTarget)).toThrow('target commit differs')
+  })
+
+  it('rejects arbitrary strings and a target.build value that contradicts the state', () => {
+    const base = buildFreshness('fresh', latestSha)
+    const bad = freshnessRun({ ...base, remoteSha: 'x', buildSha: 'x',
+      remote: { ...base.remote!, sha: 'x' }, build: { ...base.build!, sha: 'x' } }, 'x')
+    expect(() => assertRunFreshness(bad)).toThrow('not 40-hex')
+    const wrongBuild = freshnessRun(buildFreshness('fresh', latestSha))
+    wrongBuild.target.build = 'stale'
+    expect(() => assertRunFreshness(wrongBuild)).toThrow('target.build=production')
+    const staleBuild = freshnessRun(buildFreshness('stale', oldSha))
+    staleBuild.target.build = 'production'
+    expect(() => assertRunFreshness(staleBuild)).toThrow('target.build=stale')
+    expect(() => assertRunFreshness(freshnessRun(buildFreshness('failed', oldSha))))
+      .toThrow('failed state cannot carry a build SHA')
   })
 
   it('rejects a fresh claim or target commit that contradicts the build SHA', () => {
@@ -346,6 +464,15 @@ describe('run freshness contract', () => {
     const legacy = { ...run }
     delete legacy.freshness
     expect(() => assertRunTested(legacy)).not.toThrow()
+  })
+
+  it('rejects an all-skip run or one missing a fixed path even when a build SHA exists', () => {
+    const allSkip = freshnessRun(buildFreshness('fresh', latestSha))
+    allSkip.steps = allSkip.steps.map(step => ({ ...step, status: 'skip' as const }))
+    expect(() => assertRunTested(allSkip)).toThrow('did not execute any path')
+    const missing = freshnessRun(buildFreshness('fresh', latestSha))
+    missing.steps = missing.steps.slice(0, 6)
+    expect(() => assertRunTested(missing)).toThrow('fixed seven paths')
   })
 
   it('renders both SHAs and marks a stale or failed run as not latest', () => {
@@ -414,19 +541,30 @@ describe('observer tool facts', () => {
 })
 
 describe('nightly build selection', () => {
-  const meta = (value: string) => ({ schema: 'nightly-build/v1' as const, sha: value, lockHash: 'x',
-    builtAt: '2026-11-08T00:00:00.000Z', directory: `/builds/${value}`, source: '/builds/source', durationMs: 1 })
+  const meta = (value: string) => ({ schema: 'nightly-build/v1' as const, sha: value, lockHash: 'a'.repeat(64),
+    builtAt: '2026-11-08T00:00:00.000Z', directory: `/builds/${value}`, source: '/builds/source', durationMs: 1,
+    manifestHash: 'b'.repeat(64), entrypoints: ['index.html', 'static/js/main.js'], fileCount: 2 })
   const lastGood = { ...meta(oldSha), directory: `/builds/${oldSha}` }
 
   it('is fresh only when the exact remote SHA was built or reused', () => {
     const fresh = chooseNightlyBuild({ remoteSha: latestSha,
-      buildResult: { status: 'built', directory: `/builds/${latestSha}`, meta: meta(latestSha) } })
+      buildResult: { status: 'built', verified: true, directory: `/builds/${latestSha}`, meta: meta(latestSha) } })
     expect(fresh.state).toBe('fresh')
     expect(fresh.reason).toBeNull()
     expect(fresh.chosen).toMatchObject({ sha: latestSha, source: 'fresh-build' })
     const reused = chooseNightlyBuild({ remoteSha: latestSha,
-      buildResult: { status: 'reused', directory: `/builds/${latestSha}`, meta: meta(latestSha) } })
+      buildResult: { status: 'reused', verified: true, directory: `/builds/${latestSha}`, meta: meta(latestSha) } })
     expect(reused.chosen).toMatchObject({ sha: latestSha, source: 'reused-build' })
+  })
+
+  it('does not treat a built or reused result without artifact verification as fresh', () => {
+    const unverified = chooseNightlyBuild({ remoteSha: latestSha, lastGood,
+      buildResult: { status: 'built', directory: `/builds/${latestSha}`, meta: meta(latestSha) } })
+    expect(unverified.state).toBe('stale')
+    expect(unverified.reason).toContain('未通过产物校验')
+    const failed = chooseNightlyBuild({ remoteSha: latestSha,
+      buildResult: { status: 'reused', directory: `/builds/${latestSha}`, meta: meta(latestSha) } })
+    expect(failed.state).toBe('failed')
   })
 
   it('marks a last good build stale when the new SHA failed, with the real failure in the reason', () => {

@@ -5,8 +5,9 @@ import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import process from 'node:process'
-import { buildEnv, chooseNightlyBuild, ensureBuild, lastGoodBuild, networkEnv, parseScutilProxy, remoteMainSha,
-  servedBuildMatches } from './fretsense-nightly-build.mjs'
+import { buildEnv, chooseNightlyBuild, clearPreviewOwner, ensureBuild, lastGoodBuild, networkEnv, parseScutilProxy,
+  PREVIEW_OWNER, readJson, remoteMainSha, servedBuildMatches, trustedPreviewOwner,
+  writePreviewOwner } from './fretsense-nightly-build.mjs'
 
 function argsOf(argv) {
   const values = {}
@@ -124,21 +125,30 @@ const listenPids = () => {
 const commandOf = (pid) => {
   try { return execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' }).trim() } catch { return '' }
 }
-const stopStalePreview = async () => {
+const cwdOf = (pid) => {
+  try {
+    const text = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8' })
+    const line = text.split(/\r?\n/).find(row => row.startsWith('n'))
+    return line ? line.slice(1) : ''
+  } catch { return '' }
+}
+const stopOwnedPreview = async (chosenBuild) => {
   const pids = listenPids()
   if (!pids.length) return { ok: true }
-  const commands = pids.map(pid => ({ pid, command: commandOf(pid) }))
-  const foreign = commands.filter(item => !item.command.includes('serve_static_preview.mjs'))
-  if (foreign.length) {
-    return { ok: false, reason: `port ${port} is held by ${foreign.map(item => `${item.pid} ${item.command}`).join('; ')}` }
+  const owner = readJson(path.join(buildRoot, PREVIEW_OWNER))
+  const trusted = trustedPreviewOwner({ owner, buildRoot, sourceDir: chosenBuild.sourceDir, port,
+    listeningPids: pids, commandOf, cwdOf })
+  if (!trusted.ownedPid) {
+    return { ok: false, reason: `port ${port} is held by another preview: ` +
+      trusted.foreign.map(item => `${item.pid} ${item.command || item.cwd || 'unknown'}`).join('; ') }
   }
-  for (const item of commands) { try { process.kill(item.pid, 'SIGTERM') } catch { /* already gone */ } }
+  try { process.kill(trusted.ownedPid, 'SIGTERM') } catch { /* already gone */ }
   const until = Date.now() + 5_000
   while (Date.now() < until) {
-    if (!(await reachable())) return { ok: true }
+    if (!(await reachable())) { clearPreviewOwner(buildRoot, trusted.ownedPid); return { ok: true } }
     await new Promise(resolve => setTimeout(resolve, 150))
   }
-  return { ok: false, reason: `port ${port} still answers after stopping the old preview` }
+  return { ok: false, reason: `port ${port} still answers after stopping the owned preview` }
 }
 
 let preview
@@ -150,23 +160,31 @@ async function serve(chosenBuild) {
   fs.rmSync(link, { recursive: true, force: true })
   fs.symlinkSync(path.relative(chosenBuild.sourceDir, chosenBuild.directory), link, 'dir')
   if (await reachable()) {
-    const match = await servedBuildMatches({ target, buildDir: chosenBuild.directory })
+    const match = await servedBuildMatches({ target, buildDir: chosenBuild.directory, sha: chosenBuild.sha })
     if (match.match) { previewState = 'reused'; return true }
-    const stopped = await stopStalePreview()
+    const stopped = await stopOwnedPreview(chosenBuild)
     if (!stopped.ok) { previewState = 'conflict'; previewReason = `${match.reason}; ${stopped.reason}`; return false }
   }
-  preview = spawn(process.execPath, [path.join(chosenBuild.sourceDir, 'tools', 'serve_static_preview.mjs')], {
+  const script = path.join(chosenBuild.sourceDir, 'tools', 'serve_static_preview.mjs')
+  preview = spawn(process.execPath, [script], {
     cwd: chosenBuild.sourceDir,
     env: { ...process.env, HOST: url.hostname, PORT: port },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
+  if (preview.pid) {
+    writePreviewOwner(buildRoot, { pid: preview.pid, port, buildRoot, cwd: chosenBuild.sourceDir, script,
+      startedAt: new Date().toISOString() })
+  }
   let stderr = ''
+  let spawnError
+  preview.on('error', error => { spawnError = error })
   preview.stderr.on('data', chunk => { stderr += String(chunk) })
   const until = Date.now() + 15_000
   while (Date.now() < until) {
+    if (spawnError) { previewState = 'failed'; previewReason = `preview spawn failed: ${spawnError.message}`; return false }
     if (await reachable()) {
       startedPreview = true
-      const match = await servedBuildMatches({ target, buildDir: chosenBuild.directory })
+      const match = await servedBuildMatches({ target, buildDir: chosenBuild.directory, sha: chosenBuild.sha })
       if (!match.match) { previewState = 'mismatch'; previewReason = match.reason; return false }
       previewState = 'started'
       return true
@@ -281,5 +299,6 @@ try {
   process.stdout.write(`${path.join(output, 'run.json')}\n`)
 } finally {
   await browser?.close().catch(() => {})
+  if (preview?.pid) clearPreviewOwner(buildRoot, preview.pid)
   preview?.kill()
 }
